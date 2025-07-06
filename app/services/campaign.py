@@ -19,8 +19,10 @@ class CampaignService:
         """Create a new campaign and queue its messages"""
         # First check if the sender has an active session
         waha_service = WAHASessionService(self.db)
-        session_status = await waha_service.check_session_status(campaign.sender_number)
-        
+        try:
+            session_status = await waha_service.check_session_status(campaign.sender_number)
+        except Exception as e:
+            raise ValueError("WhatsApp session not found or not connected. Please create a session and scan the QR code before sending messages.")
         if session_status.get('status') not in ('CONNECTED', 'WORKING'):
             raise ValueError("WhatsApp session not connected. Please scan QR code to authenticate.")
         

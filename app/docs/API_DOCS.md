@@ -51,7 +51,7 @@ This API allows users to send bulk WhatsApp messages via their own numbers using
 
 ## Session Management Endpoints
 
-### `GET /api/sessions/{sender_number}/status`
+### `GET /api/sessions/`
 **Description:** Get session state for a sender.
 - **Returns:** `active in memory`, `saved in DB`, or `not found`.
 - **Access:** User or Admin
@@ -107,6 +107,15 @@ This API allows users to send bulk WhatsApp messages via their own numbers using
 ### `GET /api/admin/delays`
 **Description:** Get current message and sender switch delays.
 - **Access:** Admin only
+
+### `POST /api/user-delays/instant`
+**Description:** Instantly set message delay and sender switch delay for the next operation for a user, then automatically revert to default values.
+- **Input:**
+  - `sender_number` (string, required, query param)
+  - `message_delay` (int, optional, query param)
+  - `sender_switch_delay` (int, optional, query param)
+- **Returns:** The new delay values and a note that they will revert to default shortly.
+- **Access:** Any user
 
 ---
 

@@ -128,20 +128,6 @@ async def logout_session(
         logging.error(f"Error logging out session {phone_number}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/health", response_model=schemas.HealthCheckResponse)
-async def check_health(
-    db: AsyncSession = Depends(get_db),
-    _: str = Depends(verify_admin_token)  # Only admins can check health
-):
-    """Check WAHA API health status"""
-    waha_service = WAHASessionService(db)
-    try:
-        result = await waha_service.health_check()
-        return result
-    except Exception as e:
-        logging.error(f"Health check failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.delete("/{phone_number}", response_model=schemas.SessionInfo)
 async def delete_session(
     phone_number: str,

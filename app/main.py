@@ -78,8 +78,8 @@ async def init_services():
     session_monitor = SessionMonitor(engine)
     await session_monitor.start()
     
-    # Start message queue processor
-    await message_queue.start_processing(engine)
+    # Start message queue processor with 4 workers
+    await message_queue.start_processing(engine, num_workers=4)
     
     logging.info("Database initialized and background services started")
 
@@ -99,10 +99,6 @@ async def shutdown_event():
     await session_monitor.stop()
     
     logging.info("Application shutting down, services stopped")
-
-@app.get("/", tags=["health"])
-async def root():
-    return {"status": "healthy", "service": "WhatsApp Bulk Messaging API"}
 
 @app.get("/")
 async def root():

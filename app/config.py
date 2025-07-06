@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     sender_switch_delay: int = int(os.getenv("SENDER_SWITCH_DELAY", "5"))
 
     # Logging Settings
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    log_level: str = os.getenv("LOG_LEVEL", "DEBUG")  # Set default log level to DEBUG for troubleshooting
     log_file: str = os.getenv("LOG_FILE", "./logs/whatsapp_backend.log")
 
 settings = Settings()

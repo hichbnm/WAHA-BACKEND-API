@@ -24,25 +24,31 @@ class MessageQueue:
             cls._instance.sender_switch_delay = int(os.getenv('SENDER_SWITCH_DELAY', '5'))  # Delay when switching senders
             cls._instance.processing = False
             cls._instance.processing_task = None
+            cls._instance.worker_tasks = []  # Store worker tasks
+            cls._instance.num_workers = 4  # Default to 4 workers
         return cls._instance
 
-    async def start_processing(self, db_pool):
-        """Start processing the message queue"""
+    async def start_processing(self, db_pool, num_workers: int = None):
+        """Start multiple workers to process the message queue in parallel."""
         if not self.processing:
             self.processing = True
-            self.processing_task = asyncio.create_task(self._process_queue(db_pool))
-            logging.info("Message queue processor started")
+            self.db_pool = db_pool
+            if num_workers is not None:
+                self.num_workers = num_workers
+            self.worker_tasks = [asyncio.create_task(self._process_queue(db_pool)) for _ in range(self.num_workers)]
+            logging.info(f"Message queue processor started with {self.num_workers} workers")
 
     async def stop_processing(self):
-        """Stop processing the message queue"""
+        """Stop all worker tasks."""
         if self.processing:
             self.processing = False
-            if self.processing_task:
-                self.processing_task.cancel()
+            for task in self.worker_tasks:
+                task.cancel()
                 try:
-                    await self.processing_task
+                    await task
                 except asyncio.CancelledError:
                     pass
+            self.worker_tasks = []
             logging.info("Message queue processor stopped")
 
     async def add_campaign(self, campaign_id: int, sender_number: str = None):
@@ -72,6 +78,9 @@ class MessageQueue:
             return sum(1 for _, s in self.queue if s == sender_number)
 
     async def _process_queue(self, db_pool):
+        import threading
+        import asyncio
+        logging.info(f"WORKER_CONTEXT: thread={threading.current_thread().name}, event_loop={asyncio.get_event_loop()}")
         self.db_pool = db_pool  # Store for add_campaign fallback
         """Process messages in the queue"""
         while self.processing:
@@ -85,28 +94,35 @@ class MessageQueue:
 
                 if campaign_id:
                     try:
-                        async with AsyncSession(db_pool) as db:
-                            # Get campaign details
+                        # Fetch campaign details once
+                        async with AsyncSession(db_pool, expire_on_commit=False) as db:
                             query = select(Campaign).where(Campaign.id == campaign_id)
                             result = await db.execute(query)
                             campaign = result.scalar_one_or_none()
-
                             if not campaign:
                                 logging.error(f"Campaign {campaign_id} not found")
                                 continue
-
-                            # Get pending messages
-                            query = select(Message).where(
+                            # Get pending message IDs
+                            query = select(Message.id).where(
                                 Message.campaign_id == campaign_id,
                                 Message.status == "PENDING"
                             )
                             result = await db.execute(query)
-                            messages = result.scalars().all()
+                            message_ids = [row[0] for row in result.fetchall()]
 
-                            # Process each message
-                            messaging_service = MessagingService()
-                            for message in messages:
-                                try:
+                        messaging_service = MessagingService()
+                        for message_id in message_ids:
+                            try:
+                                # Use a new session for each message
+                                async with AsyncSession(db_pool, expire_on_commit=False) as db_msg:
+                                    # Fetch message and campaign fresh in this session
+                                    query = select(Message).where(Message.id == message_id)
+                                    result = await db_msg.execute(query)
+                                    message = result.scalar_one()
+                                    query = select(Campaign).where(Campaign.id == campaign_id)
+                                    result = await db_msg.execute(query)
+                                    campaign = result.scalar_one()
+
                                     # Check and apply rate limiting
                                     await self._apply_rate_limiting(campaign.sender_number)
 
@@ -128,23 +144,35 @@ class MessageQueue:
                                     message.status = "SENT"
                                     message.sent_at = datetime.utcnow()
                                     campaign.sent_messages += 1
-                                    await db.commit()
+                                    await db_msg.commit()
 
                                     # Update last send time
                                     self.last_send_time[campaign.sender_number] = datetime.utcnow()
 
-                                except Exception as e:
-                                    logging.error(f"Error sending message {message.id}: {str(e)}")
+                            except Exception as e:
+                                logging.error(f"Error sending message {message_id}: {str(e)}")
+                                # Use a new session for error update
+                                async with AsyncSession(db_pool, expire_on_commit=False) as db_err:
+                                    query = select(Message).where(Message.id == message_id)
+                                    result = await db_err.execute(query)
+                                    message = result.scalar_one()
+                                    query = select(Campaign).where(Campaign.id == campaign_id)
+                                    result = await db_err.execute(query)
+                                    campaign = result.scalar_one()
                                     message.status = "FAILED"
                                     message.error = str(e)
                                     campaign.failed_messages += 1
-                                    await db.commit()
+                                    await db_err.commit()
 
-                            # Update campaign status
+                        # After all messages, update campaign status
+                        async with AsyncSession(db_pool, expire_on_commit=False) as db_final:
+                            query = select(Campaign).where(Campaign.id == campaign_id)
+                            result = await db_final.execute(query)
+                            campaign = result.scalar_one()
                             campaign.status = "COMPLETED"
                             if campaign.failed_messages > 0:
                                 campaign.status = "COMPLETED_WITH_ERRORS"
-                            await db.commit()
+                            await db_final.commit()
 
                     except Exception as e:
                         logging.error(f"Error processing campaign {campaign_id}: {str(e)}")

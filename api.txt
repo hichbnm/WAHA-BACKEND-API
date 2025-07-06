@@ -1,9 +1,0 @@
-# api/send
-
-{
-    "sender_number": "42108077",
-    "recipients": ["21642108101"],
-    "template": "Hello, test delay!",
-    "media_url": null
-}
-
