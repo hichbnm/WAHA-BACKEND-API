@@ -8,6 +8,8 @@ from app.db.database import get_db
 from fastapi.responses import JSONResponse
 import logging
 from typing import Optional, List
+from datetime import timedelta
+from app.models.models import Session  # Import the Session model
 
 router = APIRouter()
 
@@ -55,18 +57,27 @@ async def get_session(
     phone_number: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """Get session information"""
+    """Get session information, including last active and expiry info."""
     waha_service = WAHASessionService(db)
     try:
         session = await waha_service.get_session_info(phone_number)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
-        # Map WAHA response to SessionResponse
+        # Fetch DB session for last_active and possible expiry
+        from sqlalchemy import select
+        result = await db.execute(select(Session).where(Session.phone_number == phone_number))
+        db_session = result.scalar_one_or_none()
+        last_active = db_session.last_active if db_session else None
+        # Example expiry: 14 days after last_active
+        expires_at = (last_active + timedelta(days=14)) if last_active else None
+        requires_auth = session.get("status") in ["REQUIRES_AUTH", "EXPIRED"]
         return schemas.SessionResponse(
             phone_number=session.get("name", phone_number),
             status=session.get("status", "UNKNOWN"),
             message="OK",
-            last_active=None,  # You can add logic to fetch this from DB if needed
+            last_active=last_active,
+            expires_at=expires_at,
+            requires_auth=requires_auth,
             data=session
         )
     except HTTPException:

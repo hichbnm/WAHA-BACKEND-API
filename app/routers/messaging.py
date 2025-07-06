@@ -71,12 +71,12 @@ async def list_campaigns(
 
 @router.get("/metrics", response_model=schemas.SystemMetrics)
 async def get_system_metrics(
-    admin_token: str = Depends(verify_admin_token),
+    sender_number: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """Get system-wide metrics (admin only)"""
+    """Get system metrics relevant to the current sender (user-level, no authentication required)"""
     campaign_service = CampaignService(db)
-    return await campaign_service.get_system_metrics()
+    return await campaign_service.get_system_metrics(sender_number=sender_number)
 
 @router.get("/users", response_model=List[schemas.UserStats])
 async def list_users(

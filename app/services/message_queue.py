@@ -16,7 +16,8 @@ class MessageQueue:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(MessageQueue, cls).__new__(cls)
-            cls._instance.queue = deque()  # Campaign IDs queue
+            # Store (campaign_id, sender_number) tuples for fast per-user queue size
+            cls._instance.queue = deque()  # Each item: (campaign_id, sender_number)
             cls._instance.active_campaigns: Set[int] = set()  # Currently processing campaigns
             cls._instance.last_send_time: Dict[str, datetime] = {}  # Last send time per sender
             cls._instance.message_delay = int(os.getenv('MESSAGE_DELAY', '2'))  # Delay between messages
@@ -44,27 +45,42 @@ class MessageQueue:
                     pass
             logging.info("Message queue processor stopped")
 
-    async def add_campaign(self, campaign_id: int):
-        """Add a campaign to the queue"""
+    async def add_campaign(self, campaign_id: int, sender_number: str = None):
+        """Add a campaign to the queue, storing sender_number for fast per-user stats."""
         async with self._lock:
             if campaign_id not in self.active_campaigns:
-                self.queue.append(campaign_id)
-                logging.info(f"Campaign {campaign_id} added to queue")
+                if sender_number is None:
+                    # Fallback: fetch sender_number from DB (should not happen in optimized flow)
+                    from app.models.models import Campaign
+                    import asyncio
+                    async with AsyncSession(self.db_pool) as db:
+                        query = select(Campaign).where(Campaign.id == campaign_id)
+                        result = await db.execute(query)
+                        campaign = result.scalar_one_or_none()
+                        sender_number = campaign.sender_number if campaign else None
+                self.queue.append((campaign_id, sender_number))
+                logging.info(f"Campaign {campaign_id} (sender {sender_number}) added to queue")
 
     async def get_size(self) -> int:
         """Get current queue size"""
         async with self._lock:
             return len(self.queue)
 
+    async def get_size_by_sender(self, sender_number: str) -> int:
+        """Get the number of campaigns in the queue for a specific sender_number."""
+        async with self._lock:
+            return sum(1 for _, s in self.queue if s == sender_number)
+
     async def _process_queue(self, db_pool):
+        self.db_pool = db_pool  # Store for add_campaign fallback
         """Process messages in the queue"""
         while self.processing:
             try:
-                # Get next campaign if queue not empty
                 campaign_id = None
+                sender_number = None
                 async with self._lock:
                     if self.queue:
-                        campaign_id = self.queue.popleft()
+                        campaign_id, sender_number = self.queue.popleft()
                         self.active_campaigns.add(campaign_id)
 
                 if campaign_id:

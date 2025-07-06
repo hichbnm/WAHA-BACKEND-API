@@ -111,37 +111,60 @@ class CampaignService:
         result = await self.db.execute(query)
         return result.scalars().all()
 
-    async def get_system_metrics(self) -> schemas.SystemMetrics:
-        """Get system-wide metrics"""
-        # Get active sessions count
-        session_query = select(func.count()).select_from(models.Session).where(
-            or_(models.Session.status == 'CONNECTED', models.Session.status == 'WORKING')
-        )
-        active_sessions = await self.db.execute(session_query)
-        active_sessions = active_sessions.scalar() or 0
+    async def get_system_metrics(self, sender_number: str = None) -> schemas.SystemMetrics:
+        """Get system metrics. If sender_number is provided, return stats for that sender only."""
+        if sender_number:
+            # Per-user stats
+            session_query = select(func.count()).select_from(models.Session).where(
+                models.Session.phone_number == sender_number,
+                or_(models.Session.status == 'CONNECTED', models.Session.status == 'WORKING')
+            )
+            active_sessions = await self.db.execute(session_query)
+            active_sessions = active_sessions.scalar() or 0
+
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            messages_query = select(func.count()).select_from(models.Message).where(
+                models.Message.sent_at >= today_start,
+                models.Message.status == 'SENT',
+                models.Message.campaign_id.in_(select(models.Campaign.id).where(models.Campaign.sender_number == sender_number))
+            )
+            messages_sent_today = await self.db.execute(messages_query)
+            messages_sent_today = messages_sent_today.scalar() or 0
+
+            queue_size = await message_queue.get_size()  # Per-user queue size not implemented, return global size
+
+            campaigns_query = select(func.count()).select_from(models.Campaign).where(models.Campaign.sender_number == sender_number)
+            total_campaigns = await self.db.execute(campaigns_query)
+            total_campaigns = total_campaigns.scalar() or 0
+
+            # Only 1 user for this sender
+            total_users = 1
+        else:
+            # System-wide stats (admin)
+            session_query = select(func.count()).select_from(models.Session).where(
+                or_(models.Session.status == 'CONNECTED', models.Session.status == 'WORKING')
+            )
+            active_sessions = await self.db.execute(session_query)
+            active_sessions = active_sessions.scalar() or 0
+            
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            messages_query = select(func.count()).select_from(models.Message).where(
+                models.Message.sent_at >= today_start,
+                models.Message.status == 'SENT'
+            )
+            messages_sent_today = await self.db.execute(messages_query)
+            messages_sent_today = messages_sent_today.scalar() or 0
+            
+            queue_size = await message_queue.get_size()
+            
+            campaigns_query = select(func.count()).select_from(models.Campaign)
+            total_campaigns = await self.db.execute(campaigns_query)
+            total_campaigns = total_campaigns.scalar() or 0
+            
+            users_query = select(func.count(models.Campaign.sender_number.distinct()))
+            total_users = await self.db.execute(users_query)
+            total_users = total_users.scalar() or 0
         
-        # Get messages sent today
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        messages_query = select(func.count()).select_from(models.Message).where(
-            models.Message.sent_at >= today_start,
-            models.Message.status == 'SENT'
-        )
-        messages_sent_today = await self.db.execute(messages_query)
-        messages_sent_today = messages_sent_today.scalar() or 0
-        
-        # Get current queue size
-        queue_size = await message_queue.get_size()
-        
-        # Get total campaigns and users
-        campaigns_query = select(func.count()).select_from(models.Campaign)
-        total_campaigns = await self.db.execute(campaigns_query)
-        total_campaigns = total_campaigns.scalar() or 0
-        
-        users_query = select(func.count(models.Campaign.sender_number.distinct()))
-        total_users = await self.db.execute(users_query)
-        total_users = total_users.scalar() or 0
-        
-        # Always include server_uptime in the response
         uptime = (datetime.utcnow() - self.server_start_time).total_seconds() if hasattr(self, 'server_start_time') else 0
         return schemas.SystemMetrics(
             active_sessions=active_sessions,

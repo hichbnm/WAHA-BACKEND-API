@@ -134,11 +134,13 @@ class SessionInfo(BaseModel):
 
 class SessionResponse(BaseModel):
     """Response model for session operations"""
-    status: str = Field(..., description="Current session status")
-    message: str = Field(..., description="Status message")
+    status: str = Field(..., description="Current session status. One of: WAITING_FOR_SCAN, SCANNED, CONNECTED, EXPIRED, FAILED, REQUIRES_AUTH, UNKNOWN")
+    message: str = Field(..., description="Status message or error details")
     phone_number: str = Field(..., description="The phone number associated with the session")
-    last_active: Optional[datetime] = None
-    data: Optional[Dict[str, Any]] = None
+    last_active: Optional[datetime] = Field(None, description="Last time the session was active (UTC)")
+    expires_at: Optional[datetime] = Field(None, description="Session expiry time (UTC), if known")
+    requires_auth: Optional[bool] = Field(None, description="True if session requires re-authentication")
+    data: Optional[Dict[str, Any]] = Field(None, description="Raw session data from WAHA or DB")
 
     class Config:
         from_attributes = True
