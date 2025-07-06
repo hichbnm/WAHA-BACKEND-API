@@ -8,6 +8,7 @@ from app.models import models, schemas
 from app.services.messaging import MessagingService
 from app.services.campaign import CampaignService
 from app.utils.auth import verify_admin_token, get_optional_admin_token
+from app.routers.delays import normalize_number  # Reuse normalization utility
 
 router = APIRouter()
 
@@ -17,6 +18,8 @@ async def create_campaign(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new messaging campaign"""
+    campaign.sender_number = normalize_number(campaign.sender_number)
+    campaign.recipients = [normalize_number(r) for r in campaign.recipients]
     campaign_service = CampaignService(db)
     result = await campaign_service.create_campaign(campaign)
     return result
@@ -56,6 +59,9 @@ async def list_campaigns(
     """List campaigns with optional filters"""
     campaign_service = CampaignService(db)
     
+    if sender_number:
+        sender_number = normalize_number(sender_number)
+    
     # If not admin, require sender_number and verify it matches
     if not admin_token:
         if not sender_number:
@@ -75,6 +81,7 @@ async def get_system_metrics(
     db: AsyncSession = Depends(get_db)
 ):
     """Get system metrics relevant to the current sender (user-level, no authentication required)"""
+    sender_number = normalize_number(sender_number)
     campaign_service = CampaignService(db)
     return await campaign_service.get_system_metrics(sender_number=sender_number)
 

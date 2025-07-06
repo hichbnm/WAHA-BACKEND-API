@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import Campaign, Message
 from app.services.messaging import MessagingService
 
+# Utility for phone number normalization (import from delays or define here)
+def normalize_number(number: str) -> str:
+    return number.lstrip('+').strip() if number else number
+
 class MessageQueue:
     _instance = None
     _lock = asyncio.Lock()
@@ -52,6 +56,8 @@ class MessageQueue:
             logging.info("Message queue processor stopped")
 
     async def add_campaign(self, campaign_id: int, sender_number: str = None):
+        if sender_number:
+            sender_number = normalize_number(sender_number)
         """Add a campaign to the queue, storing sender_number for fast per-user stats."""
         async with self._lock:
             if campaign_id not in self.active_campaigns:
@@ -63,7 +69,7 @@ class MessageQueue:
                         query = select(Campaign).where(Campaign.id == campaign_id)
                         result = await db.execute(query)
                         campaign = result.scalar_one_or_none()
-                        sender_number = campaign.sender_number if campaign else None
+                        sender_number = normalize_number(campaign.sender_number) if campaign else None
                 self.queue.append((campaign_id, sender_number))
                 logging.info(f"Campaign {campaign_id} (sender {sender_number}) added to queue")
 
@@ -73,6 +79,7 @@ class MessageQueue:
             return len(self.queue)
 
     async def get_size_by_sender(self, sender_number: str) -> int:
+        sender_number = normalize_number(sender_number)
         """Get the number of campaigns in the queue for a specific sender_number."""
         async with self._lock:
             return sum(1 for _, s in self.queue if s == sender_number)
@@ -188,6 +195,7 @@ class MessageQueue:
                 await asyncio.sleep(1)  # Longer delay on error
 
     async def _apply_rate_limiting(self, sender_number: str):
+        sender_number = normalize_number(sender_number)
         """Apply rate limiting rules"""
         import os
         now = datetime.utcnow()

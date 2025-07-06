@@ -10,6 +10,10 @@ router = APIRouter()
 _user_delays = {}
 _user_delays_lock = threading.Lock()
 
+def normalize_number(number: str) -> str:
+    """Remove leading + and whitespace from phone numbers."""
+    return number.lstrip('+').strip() if number else number
+
 @router.get("/delays", tags=["admin"])
 def get_delays(admin_token: str = Depends(verify_admin_token)):
     """Get current message and sender switch delays (admin only)"""
@@ -36,7 +40,7 @@ def set_delays(
 
 @router.get("/user-delays", tags=["user"], include_in_schema=True)
 def get_user_delays(sender_number: str = Query(...)):
-    """Get current message and sender switch delays for a user"""
+    sender_number = normalize_number(sender_number)
     with _user_delays_lock:
         user_delay = _user_delays.get(sender_number)
     if user_delay:
@@ -53,7 +57,7 @@ def set_user_delays(
     message_delay: int = None,
     sender_switch_delay: int = None
 ):
-    """Set message and sender switch delays for a user (per-user config, in-memory only)"""
+    sender_number = normalize_number(sender_number)
     with _user_delays_lock:
         user_delay = _user_delays.get(sender_number) or {
             "MESSAGE_DELAY": int(os.getenv("MESSAGE_DELAY", 2)),

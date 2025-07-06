@@ -8,6 +8,7 @@ from app.services.messaging import MessagingService
 from app.services.waha_session import WAHASessionService
 from app.services.message_queue import message_queue
 import os
+from app.routers.delays import normalize_number  # Reuse normalization utility
 
 class CampaignService:
     def __init__(self, db: AsyncSession):
@@ -17,6 +18,10 @@ class CampaignService:
         
     async def create_campaign(self, campaign: schemas.CampaignCreate) -> schemas.CampaignResponse:
         """Create a new campaign and queue its messages"""
+        # Normalize sender_number and recipients
+        campaign.sender_number = normalize_number(campaign.sender_number)
+        campaign.recipients = [normalize_number(r) for r in campaign.recipients]
+        
         # First check if the sender has an active session
         waha_service = WAHASessionService(self.db)
         try:
@@ -101,6 +106,7 @@ class CampaignService:
         query = select(models.Campaign)
         
         if sender_number:
+            sender_number = normalize_number(sender_number)
             query = query.where(models.Campaign.sender_number == sender_number)
         if status:
             query = query.where(models.Campaign.status == status)
@@ -116,6 +122,7 @@ class CampaignService:
     async def get_system_metrics(self, sender_number: str = None) -> schemas.SystemMetrics:
         """Get system metrics. If sender_number is provided, return stats for that sender only."""
         if sender_number:
+            sender_number = normalize_number(sender_number)
             # Per-user stats
             session_query = select(func.count()).select_from(models.Session).where(
                 models.Session.phone_number == sender_number,
