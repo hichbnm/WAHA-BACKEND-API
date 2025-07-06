@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import messaging, admin, sessions, webhook
+from app.routers import messaging, admin, sessions, webhook, delays
 from app.services.session_monitor import SessionMonitor
 from app.services.message_queue import message_queue
 from app.db.database import engine, Base
@@ -8,6 +8,9 @@ from app.config import settings
 from fastapi.staticfiles import StaticFiles
 import logging
 import os
+from app.services.session_restore import restore_sessions_on_startup
+import asyncio
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -54,6 +57,11 @@ app.include_router(
     prefix="/api/webhook",  # Now webhook endpoints will be at /api/webhook
     tags=["webhook"]
 )
+app.include_router(
+    delays.router,
+    prefix="/api/admin",
+    tags=["admin"]
+)
 
 # Mount static files
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -78,6 +86,7 @@ async def init_services():
 @app.on_event("startup")
 async def startup_event():
     await init_services()
+    await restore_sessions_on_startup()
     logging.info("Application started successfully")
 
 @app.on_event("shutdown")

@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select
+from sqlalchemy import func, select, or_
 from datetime import datetime, timedelta
 import asyncio
 import logging
@@ -115,7 +115,7 @@ class CampaignService:
         """Get system-wide metrics"""
         # Get active sessions count
         session_query = select(func.count()).select_from(models.Session).where(
-            models.Session.status == 'CONNECTED'
+            or_(models.Session.status == 'CONNECTED', models.Session.status == 'WORKING')
         )
         active_sessions = await self.db.execute(session_query)
         active_sessions = active_sessions.scalar() or 0
@@ -141,11 +141,13 @@ class CampaignService:
         total_users = await self.db.execute(users_query)
         total_users = total_users.scalar() or 0
         
+        # Always include server_uptime in the response
+        uptime = (datetime.utcnow() - self.server_start_time).total_seconds() if hasattr(self, 'server_start_time') else 0
         return schemas.SystemMetrics(
             active_sessions=active_sessions,
             messages_sent_today=messages_sent_today,
             current_queue_size=queue_size,
-            server_uptime=(datetime.utcnow() - self.server_start_time).total_seconds(),
+            server_uptime=uptime,
             total_campaigns=total_campaigns,
             total_users=total_users
         )

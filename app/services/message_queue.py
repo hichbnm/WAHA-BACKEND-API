@@ -145,23 +145,23 @@ class MessageQueue:
 
     async def _apply_rate_limiting(self, sender_number: str):
         """Apply rate limiting rules"""
+        import os
         now = datetime.utcnow()
-        
+        # Always fetch latest delay values from environment
+        message_delay = int(os.environ.get('MESSAGE_DELAY', '2'))
+        sender_switch_delay = int(os.environ.get('SENDER_SWITCH_DELAY', '5'))
         # Check if we need to apply sender switch delay
         last_sender = None
         if self.last_send_time:
             last_sender = max(self.last_send_time.items(), key=lambda x: x[1])[0]
-        
         if last_sender and last_sender != sender_number:
-            # Different sender, apply switch delay
-            await asyncio.sleep(self.sender_switch_delay)
-        
+            await asyncio.sleep(sender_switch_delay)
         # Check if we need to apply message delay
         if sender_number in self.last_send_time:
             last_time = self.last_send_time[sender_number]
             elapsed = (now - last_time).total_seconds()
-            if elapsed < self.message_delay:
-                await asyncio.sleep(self.message_delay - elapsed)
+            if elapsed < message_delay:
+                await asyncio.sleep(message_delay - elapsed)
 
 # Create a singleton instance
 message_queue = MessageQueue()

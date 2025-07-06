@@ -1,10 +1,12 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from datetime import datetime, timedelta
 from app.models.models import Campaign, Message, Session
 from app.services.message_queue import message_queue
 from typing import List, Dict, Any
 import logging
+import time
+from app.utils.server_state import SERVER_START_TIME
 
 class AdminService:
     def __init__(self, db: AsyncSession):
@@ -15,7 +17,7 @@ class AdminService:
         try:
             # Get active sessions count
             session_query = select(func.count()).select_from(Session).where(
-                Session.status == 'CONNECTED'
+                or_(Session.status == 'CONNECTED', Session.status == 'WORKING')
             )
             active_sessions = await self.db.execute(session_query)
             active_sessions = active_sessions.scalar() or 0
@@ -45,9 +47,9 @@ class AdminService:
                 "active_sessions": active_sessions,
                 "messages_sent_today": messages_sent_today,
                 "current_queue_size": queue_size,
+                "server_uptime": time.time() - SERVER_START_TIME,
                 "total_campaigns": total_campaigns,
-                "total_users": total_users,
-                "last_refresh": datetime.utcnow().isoformat()
+                "total_users": total_users
             }
         except Exception as e:
             logging.error(f"Error getting system metrics: {str(e)}")
