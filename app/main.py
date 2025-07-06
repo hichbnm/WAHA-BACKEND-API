@@ -1,0 +1,101 @@
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from app.routers import messaging, admin, sessions, webhook
+from app.services.session_monitor import SessionMonitor
+from app.services.message_queue import message_queue
+from app.db.database import engine, Base
+from app.config import settings
+from fastapi.staticfiles import StaticFiles
+import logging
+import os
+
+# Configure logging
+logging.basicConfig(
+    level=settings.log_level,
+    filename=settings.log_file,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# Create FastAPI app
+app = FastAPI(
+    title="WhatsApp Bulk Messaging API",
+    description="API for sending bulk WhatsApp messages using WAHA",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5000"],  # Add more origins as needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]
+)
+
+# Include routers with proper prefixes
+app.include_router(
+    messaging.router,
+    prefix="/api",
+    tags=["messaging"]
+)
+app.include_router(
+    admin.router,
+    prefix="/api/admin",
+    tags=["admin"]
+)
+app.include_router(
+    sessions.router,
+    prefix="/api/sessions",
+    tags=["sessions"]
+)
+app.include_router(
+    webhook.router,
+    prefix="/api/webhook",  # Now webhook endpoints will be at /api/webhook
+    tags=["webhook"]
+)
+
+# Mount static files
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# Create database tables and start background services
+async def init_services():
+    """Initialize database and start background services"""
+    # Initialize database
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    # Start session monitor
+    session_monitor = SessionMonitor(engine)
+    await session_monitor.start()
+    
+    # Start message queue processor
+    await message_queue.start_processing(engine)
+    
+    logging.info("Database initialized and background services started")
+
+@app.on_event("startup")
+async def startup_event():
+    await init_services()
+    logging.info("Application started successfully")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Stop message queue processor
+    await message_queue.stop_processing()
+    
+    # Stop session monitor
+    session_monitor = SessionMonitor(engine)
+    await session_monitor.stop()
+    
+    logging.info("Application shutting down, services stopped")
+
+@app.get("/", tags=["health"])
+async def root():
+    return {"status": "healthy", "service": "WhatsApp Bulk Messaging API"}
+
+@app.get("/")
+async def root():
+    """Redirect root to the WhatsApp session manager"""
+    return {"url": "/static/index.html"}

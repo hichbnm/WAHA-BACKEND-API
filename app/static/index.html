@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Session Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-8 text-center">WhatsApp Session Manager</h1>
+        
+        <!-- Create Session Form -->
+        <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+            <h2 class="text-xl font-semibold mb-4">Create New Session</h2>
+            <form id="sessionForm" class="flex gap-4">
+                <input type="tel" id="phoneNumber" placeholder="Phone Number (e.g., 1234567890)" 
+                       class="flex-1 p-2 border rounded" required pattern="[0-9]+" minlength="10">
+                <button type="submit" class="bg-blue-500 text-white px-6 py-2 rounded hover:bg-blue-600">
+                    Create Session
+                </button>
+            </form>
+        </div>
+
+        <!-- QR Code Display -->
+        <div id="qrContainer" class="hidden bg-white p-6 rounded-lg shadow-md mb-8 text-center">
+            <h2 class="text-xl font-semibold mb-4">Scan QR Code</h2>
+            <img id="qrCode" alt="WhatsApp QR Code" class="mx-auto mb-4">
+            <p class="text-sm text-gray-600 mb-4">Scan this QR code with WhatsApp on your phone</p>
+            <div class="flex justify-center gap-4">
+                <button id="refreshQR" class="bg-green-500 text-white px-6 py-2 rounded hover:bg-green-600">
+                    Refresh QR
+                </button>
+                <button id="checkStatus" class="bg-blue-500 text-white px-6 py-2 rounded hover:bg-blue-600">
+                    Check Status
+                </button>
+            </div>
+        </div>
+
+        <!-- Status Display -->
+        <div id="statusContainer" class="hidden bg-white p-6 rounded-lg shadow-md mb-8">
+            <h2 class="text-xl font-semibold mb-4">Session Status</h2>
+            <p id="statusText" class="text-lg mb-4"></p>
+            <div class="flex justify-end gap-4">
+                <button id="logoutSession" class="bg-yellow-500 text-white px-6 py-2 rounded hover:bg-yellow-600 hidden">
+                    Logout
+                </button>
+                <button id="deleteSession" class="bg-red-500 text-white px-6 py-2 rounded hover:bg-red-600 hidden">
+                    Delete Session
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentSession = null;
+        const API_BASE = 'http://localhost:5000/api';
+
+        async function createSession(phoneNumber) {
+            try {
+                const response = await fetch(`${API_BASE}/sessions`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ phone_number: phoneNumber })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to create session');
+                return data;
+            } catch (error) {
+                console.error('Error creating session:', error);
+                alert(error.message);
+                return null;
+            }
+        }
+
+        async function getQRCode(phoneNumber) {
+            try {
+                const response = await fetch(`${API_BASE}/sessions/${phoneNumber}/qr`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to get QR code');
+                return data;
+            } catch (error) {
+                console.error('Error getting QR code:', error);
+                alert(error.message);
+                return null;
+            }
+        }
+
+        async function checkSessionStatus(phoneNumber) {
+            try {
+                const response = await fetch(`${API_BASE}/sessions/${phoneNumber}`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to check status');
+                return data;
+            } catch (error) {
+                console.error('Error checking status:', error);
+                alert(error.message);
+                return null;
+            }
+        }
+
+        async function logoutSession(phoneNumber) {
+            try {
+                const response = await fetch(`${API_BASE}/sessions/${phoneNumber}/logout`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to logout');
+                return data;
+            } catch (error) {
+                console.error('Error logging out:', error);
+                alert(error.message);
+                return null;
+            }
+        }
+
+        async function deleteSession(phoneNumber) {
+            try {
+                const response = await fetch(`${API_BASE}/sessions/${phoneNumber}`, {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || 'Failed to delete session');
+                return data;
+            } catch (error) {
+                console.error('Error deleting session:', error);
+                alert(error.message);
+                return null;
+            }
+        }
+
+        function updateUI(sessionStatus) {
+            const qrContainer = document.getElementById('qrContainer');
+            const statusContainer = document.getElementById('statusContainer');
+            const statusText = document.getElementById('statusText');
+            const logoutBtn = document.getElementById('logoutSession');
+            const deleteBtn = document.getElementById('deleteSession');
+
+            statusText.textContent = `Status: ${sessionStatus.status}`;
+            statusContainer.classList.remove('hidden');
+
+            if (sessionStatus.status === 'CONNECTED') {
+                qrContainer.classList.add('hidden');
+                logoutBtn.classList.remove('hidden');
+                deleteBtn.classList.remove('hidden');
+            } else {
+                qrContainer.classList.remove('hidden');
+                logoutBtn.classList.add('hidden');
+                deleteBtn.classList.add('hidden');
+            }
+        }
+
+        // Event Listeners
+        document.getElementById('sessionForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const phoneNumber = document.getElementById('phoneNumber').value;
+            currentSession = phoneNumber;
+            
+            const session = await createSession(phoneNumber);
+            if (session) {
+                const qrData = await getQRCode(phoneNumber);
+                if (qrData && qrData.qr_code) {
+                    document.getElementById('qrCode').src = `data:image/png;base64,${qrData.qr_code}`;
+                    document.getElementById('qrContainer').classList.remove('hidden');
+                }
+                updateUI(session);
+            }
+        });
+
+        document.getElementById('refreshQR').addEventListener('click', async () => {
+            if (currentSession) {
+                const qrData = await getQRCode(currentSession);
+                if (qrData && qrData.qr_code) {
+                    document.getElementById('qrCode').src = `data:image/png;base64,${qrData.qr_code}`;
+                }
+            }
+        });
+
+        document.getElementById('checkStatus').addEventListener('click', async () => {
+            if (currentSession) {
+                const status = await checkSessionStatus(currentSession);
+                if (status) {
+                    updateUI(status);
+                }
+            }
+        });
+
+        document.getElementById('logoutSession').addEventListener('click', async () => {
+            if (currentSession) {
+                const result = await logoutSession(currentSession);
+                if (result) {
+                    currentSession = null;
+                    location.reload();
+                }
+            }
+        });
+
+        document.getElementById('deleteSession').addEventListener('click', async () => {
+            if (currentSession) {
+                const result = await deleteSession(currentSession);
+                if (result) {
+                    currentSession = null;
+                    location.reload();
+                }
+            }
+        });
+    </script>
+</body>
+</html>

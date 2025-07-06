@@ -1,0 +1,4 @@
+systemctl status postgresql
+sudo systemctl start postgresql && sudo systemctl status postgresql
+sudo -u postgres psql -c "CREATE USER whatsapp_user WITH PASSWORD 'mypassword';" && sudo -u postgres psql -c "CREATE DATABASE whatsapp_campaigns OWNER whatsapp_user;" && sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE whatsapp_campaigns TO whatsapp_user;"
+PGPASSWORD=mypassword psql -h localhost -U whatsapp_user -d whatsapp_campaigns -c "\conninfo"

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  waha:
+    image: devlikeapro/waha-plus
+    container_name: waha
+    network_mode: host
+    environment:
+      - WHATSAPP_HOOK_URL=http://localhost:5000/api/webhook
+      - WHATSAPP_HOOK_EVENTS=session.status,message,message.any,message.ack,state.change
+      - WAHA_API_KEY=waha_api_123
+      - WHATSAPP_API_KEY=waha_api_123  # For backward compatibility
+      - WHATSAPP_HOOK_RETRY=3
+      - WHATSAPP_HOOK_RETRY_INTERVAL=10
+      - ENGINE=WEBJS
+      - DEBUG=1
+      - DISPLAY=:99
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+    restart: unless-stopped
+    volumes:
+      - ./waha_data:/app/store  # Persist WhatsApp session data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '2gb'
