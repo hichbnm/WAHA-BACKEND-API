@@ -39,20 +39,6 @@ async def list_sessions(
         logging.error(f"Error listing sessions: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("", response_model=schemas.SessionResponse)
-async def create_session(
-    session: schemas.SessionCreateRequest,
-    db: AsyncSession = Depends(get_db)
-):
-    """Create a new session"""
-    waha_service = WAHASessionService(db)
-    try:
-        result = await waha_service.start_session(session.phone_number)
-        return result
-    except Exception as e:
-        logging.error(f"Error creating session: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.get("/{phone_number}", response_model=schemas.SessionResponse)
 async def get_session(
     phone_number: str,
@@ -120,6 +106,9 @@ async def delete_session(
     try:
         result = await waha_service.delete_session(phone_number)
         return result
+    except HTTPException as e:
+        # Let FastAPI handle HTTPExceptions (404, 400, etc.)
+        raise
     except Exception as e:
         logging.error(f"Error deleting session {phone_number}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

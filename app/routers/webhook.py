@@ -5,6 +5,7 @@ from app.db.database import get_db
 from app.services.messaging import MessagingService
 from typing import Optional, Dict, Any
 import logging
+from datetime import datetime
 
 router = APIRouter()
 
@@ -134,10 +135,20 @@ async def handle_connection_update(payload: Dict[str, Any], db: AsyncSession):
         # Extract connection details
         session_id = payload.get("sessionId")
         state = payload.get("state")
-        
+        if not session_id or not state:
+            logging.warning(f"Missing sessionId or state in connection update payload: {payload}")
+            return
         # Update session state in database
-        # Implement based on your needs
-        
-        logging.info(f"Session {session_id} connection state changed to: {state}")
+        from sqlalchemy import select
+        from app.models.models import Session
+        result = await db.execute(select(Session).where(Session.phone_number == session_id))
+        session = result.scalar_one_or_none()
+        if session:
+            session.status = state.upper()  # WAHA states are usually uppercase (e.g., WORKING)
+            session.last_active = datetime.utcnow()
+            await db.commit()
+            logging.info(f"Session {session_id} connection state updated to: {state}")
+        else:
+            logging.warning(f"Session {session_id} not found in DB for connection update.")
     except Exception as e:
         logging.error(f"Error handling connection update: {str(e)}")

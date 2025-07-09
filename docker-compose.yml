@@ -16,6 +16,11 @@ services:
       - DEBUG=1
       - DISPLAY=:99
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      # --- Proxy rotation config below ---
+      - WHATSAPP_PROXY_SERVER_LIST=proxy1.example.com:3128,proxy2.example.com:3128,proxy3.example.com:3128
+      # Optional: add credentials if your proxies require them
+      # - WHATSAPP_PROXY_SERVER_USERNAME=myuser
+      # - WHATSAPP_PROXY_SERVER_PASSWORD=mypass
     restart: unless-stopped
     volumes:
       - ./waha_data:/app/store  # Persist WhatsApp session data

@@ -156,6 +156,15 @@ class MessageQueue:
                                     # Update last send time
                                     self.last_send_time[campaign.sender_number] = datetime.utcnow()
 
+                                    # Update session last_active to keep session alive during broadcast
+                                    from app.models.models import Session
+                                    query = select(Session).where(Session.phone_number == campaign.sender_number)
+                                    result = await db_msg.execute(query)
+                                    session = result.scalar_one_or_none()
+                                    if session:
+                                        session.last_active = datetime.utcnow()
+                                        await db_msg.commit()
+
                             except Exception as e:
                                 logging.error(f"Error sending message {message_id}: {str(e)}")
                                 # Use a new session for error update

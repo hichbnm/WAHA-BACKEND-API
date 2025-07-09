@@ -17,7 +17,7 @@ class AdminService:
         try:
             # Get active sessions count
             session_query = select(func.count()).select_from(Session).where(
-                or_(Session.status == 'CONNECTED', Session.status == 'WORKING')
+                or_(func.upper(Session.status) == 'CONNECTED', func.upper(Session.status) == 'WORKING')
             )
             active_sessions = await self.db.execute(session_query)
             active_sessions = active_sessions.scalar() or 0
@@ -56,16 +56,16 @@ class AdminService:
             raise
 
     async def get_active_sessions(self) -> List[Dict[str, Any]]:
-        """Get all active WhatsApp sessions"""
+        """Get all active WhatsApp sessions (CONNECTED or WORKING)"""
         try:
-            query = select(Session).where(Session.status == 'CONNECTED')
+            query = select(Session).where(func.upper(Session.status).in_(['CONNECTED', 'WORKING']))
             result = await self.db.execute(query)
             sessions = result.scalars().all()
             
             return [
                 {
                     "phone_number": session.phone_number,
-                    "status": session.status,
+                    "status": session.status.upper() if session.status else None,
                     "last_active": session.last_active.isoformat(),
                     "data": session.data
                 }
@@ -161,7 +161,7 @@ class AdminService:
                     "total_messages": stats.total_messages or 0,
                     "sent_messages": stats.sent_messages or 0,
                     "failed_messages": stats.failed_messages or 0,
-                    "active_session": bool(session and session.status == 'CONNECTED'),
+                    "active_session": bool(session and session.status in ('CONNECTED', 'WORKING')),
                     "last_active": session.last_active.isoformat() if session else None,
                     "last_campaign": recent_campaign.created_at.isoformat() if recent_campaign else None
                 })

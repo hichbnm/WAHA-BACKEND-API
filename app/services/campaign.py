@@ -220,7 +220,7 @@ class CampaignService:
                 total_messages=user.total_messages or 0,
                 sent_messages=sent_messages,
                 failed_messages=failed_messages,
-                active_session=bool(session and session.status == 'CONNECTED'),
+                active_session=bool(session and session.status in ('CONNECTED', 'WORKING')),
                 last_active=session.last_active if session else None
             ))
         return user_stats
