@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Enum
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Enum, Boolean
 from sqlalchemy.orm import relationship
 from app.db.database import Base
 import enum
@@ -46,3 +46,29 @@ class Session(Base):
     status = Column(String)
     last_active = Column(DateTime, default=datetime.utcnow)
     data = Column(JSON)
+
+class Worker(Base):
+    __tablename__ = "workers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    url = Column(String, unique=True, nullable=False)
+    api_key = Column(String, nullable=False)
+    capacity = Column(Integer, default=10)  # Max sessions this worker can handle
+    name = Column(String, nullable=True)
+    is_healthy = Column(Boolean, nullable=False, default=True)  # Indicates if the worker is healthy and available
+
+    sessions = relationship("WAHASession", back_populates="worker")
+
+class WAHASession(Base):
+    __tablename__ = "waha_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=True)
+    user_id = Column(String, nullable=False)  # Reference to User (string for flexibility)
+    worker_id = Column(Integer, ForeignKey("workers.id"), nullable=False)
+    phone_number = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=True)
+    last_active = Column(DateTime, default=datetime.utcnow)
+    data = Column(JSON)
+
+    worker = relationship("Worker", back_populates="sessions")

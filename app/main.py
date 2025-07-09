@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import messaging, admin, sessions, webhook, delays
+from app.routers import messaging, admin, sessions, webhook, delays, worker
 from app.services.session_monitor import SessionMonitor
 from app.services.message_queue import message_queue
 from app.db.database import engine, Base
@@ -11,6 +11,8 @@ import os
 from app.services.session_restore import restore_sessions_on_startup
 import asyncio
 import time
+from app.services.waha_session import WAHASessionService
+from app.db.database import async_session
 
 # Configure logging
 logging.basicConfig(
@@ -62,6 +64,11 @@ app.include_router(
     prefix="/api/admin",
     tags=["admin"]
 )
+app.include_router(
+    worker.router,
+    prefix="/api/admin",
+    tags=["worker"]
+)
 
 # Mount static files
 static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -83,10 +90,22 @@ async def init_services():
     
     logging.info("Database initialized and background services started")
 
+async def periodic_monitor_sessions():
+    while True:
+        async with async_session() as db:
+            service = WAHASessionService(db)
+            try:
+                await service.monitor_sessions()
+            except Exception as e:
+                logging.error(f"Error in periodic monitor_sessions: {e}")
+        await asyncio.sleep(2)  # Run every 30 seconds
+
 @app.on_event("startup")
 async def startup_event():
     await init_services()
     await restore_sessions_on_startup()
+    # Start periodic monitor_sessions background task
+    asyncio.create_task(periodic_monitor_sessions())
     logging.info("Application started successfully")
 
 @app.on_event("shutdown")

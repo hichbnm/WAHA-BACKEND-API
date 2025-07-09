@@ -6,6 +6,7 @@ services:
     container_name: waha
     network_mode: host
     environment:
+      - PORT=3000
       - WHATSAPP_HOOK_URL=http://localhost:5000/api/webhook
       - WHATSAPP_HOOK_EVENTS=session.status,message,message.any,message.ack,state.change
       - WAHA_API_KEY=waha_api_123
@@ -17,7 +18,7 @@ services:
       - DISPLAY=:99
       - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       # --- Proxy rotation config below ---
-      - WHATSAPP_PROXY_SERVER_LIST=proxy1.example.com:3128,proxy2.example.com:3128,proxy3.example.com:3128
+      # WHATSAPP_PROXY_SERVER_LIST=proxy1.example.com:3128,proxy2.example.com:3128,proxy3.example.com:3128
       # Optional: add credentials if your proxies require them
       # - WHATSAPP_PROXY_SERVER_USERNAME=myuser
       # - WHATSAPP_PROXY_SERVER_PASSWORD=mypass
@@ -26,6 +27,96 @@ services:
       - ./waha_data:/app/store  # Persist WhatsApp session data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '2gb'
+
+  waha1:
+    image: devlikeapro/waha-plus
+    container_name: waha1
+    network_mode: host
+    environment:
+      - PORT=3001
+      - WHATSAPP_HOOK_URL=http://localhost:5000/api/webhook
+      - WHATSAPP_HOOK_EVENTS=session.status,message,message.any,message.ack,state.change
+      - WAHA_API_KEY=waha_api_1
+      - WHATSAPP_API_KEY=waha_api_1
+      - WHATSAPP_HOOK_RETRY=3
+      - WHATSAPP_HOOK_RETRY_INTERVAL=10
+      - ENGINE=NOWEB
+      - DEBUG=1
+      - DISPLAY=:99
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+    restart: unless-stopped
+    volumes:
+      - ./waha_data1:/app/store
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '2gb'
+
+  waha2:
+    image: devlikeapro/waha-plus
+    container_name: waha2
+    network_mode: host
+    environment:
+      - PORT=3002
+      - WHATSAPP_HOOK_URL=http://localhost:5000/api/webhook
+      - WHATSAPP_HOOK_EVENTS=session.status,message,message.any,message.ack,state.change
+      - WAHA_API_KEY=waha_api_2
+      - WHATSAPP_API_KEY=waha_api_2
+      - WHATSAPP_HOOK_RETRY=3
+      - WHATSAPP_HOOK_RETRY_INTERVAL=10
+      - ENGINE=NOWEB
+      - DEBUG=1
+      - DISPLAY=:99
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+    restart: unless-stopped
+    volumes:
+      - ./waha_data2:/app/store
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '2gb'
+
+  waha3:
+    image: devlikeapro/waha-plus
+    container_name: waha3
+    network_mode: host
+    environment:
+      - PORT=3003
+      - WHATSAPP_HOOK_URL=http://localhost:5000/api/webhook
+      - WHATSAPP_HOOK_EVENTS=session.status,message,message.any,message.ack,state.change
+      - WAHA_API_KEY=waha_api_3
+      - WHATSAPP_API_KEY=waha_api_3
+      - WHATSAPP_HOOK_RETRY=3
+      - WHATSAPP_HOOK_RETRY_INTERVAL=10
+      - ENGINE=NOWEB
+      - DEBUG=1
+      - DISPLAY=:99
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+    restart: unless-stopped
+    volumes:
+      - ./waha_data3:/app/store
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/api/status"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -180,3 +180,25 @@ class MeInfo(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat()
         }
+
+class WorkerCreate(BaseModel):
+    url: str
+    api_key: str
+    capacity: int = 10
+    name: str | None = None
+
+class WorkerResponse(BaseModel):
+    id: int
+    url: str
+    api_key: str
+    capacity: int
+    name: str | None = None
+
+    class Config:
+        from_attributes = True
+
+class WorkerUpdate(BaseModel):
+    url: str | None = None
+    api_key: str | None = None
+    capacity: int | None = None
+    name: str | None = None
