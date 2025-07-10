@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import Campaign, Message
 from app.services.messaging import MessagingService
+from app.routers.delays import _user_delays, _user_delays_lock
 
 # Utility for phone number normalization (import from delays or define here)
 def normalize_number(number: str) -> str:
@@ -209,9 +210,15 @@ class MessageQueue:
         """Apply rate limiting rules"""
         import os
         now = datetime.utcnow()
-        # Always fetch latest delay values from environment
-        message_delay = int(os.environ.get('MESSAGE_DELAY', '2'))
-        sender_switch_delay = int(os.environ.get('SENDER_SWITCH_DELAY', '5'))
+        # --- PATCH: Use per-user delay if set, else fallback to global ---
+        with _user_delays_lock:
+            user_delay = _user_delays.get(sender_number)
+        if user_delay:
+            message_delay = int(user_delay.get('MESSAGE_DELAY', os.environ.get('MESSAGE_DELAY', '2')))
+            sender_switch_delay = int(user_delay.get('SENDER_SWITCH_DELAY', os.environ.get('SENDER_SWITCH_DELAY', '5')))
+        else:
+            message_delay = int(os.environ.get('MESSAGE_DELAY', '2'))
+            sender_switch_delay = int(os.environ.get('SENDER_SWITCH_DELAY', '5'))
         # Check if we need to apply sender switch delay
         last_sender = None
         if self.last_send_time:
