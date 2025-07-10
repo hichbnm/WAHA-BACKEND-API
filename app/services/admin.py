@@ -75,6 +75,36 @@ class AdminService:
             logging.error(f"Error getting active sessions: {str(e)}")
             raise
 
+    async def get_all_sessions(self) -> List[dict]:
+        """Get all WhatsApp sessions (any status)"""
+        try:
+            query = select(Session)
+            result = await self.db.execute(query)
+            sessions = result.scalars().all()
+            return [
+                {
+                    "phone_number": session.phone_number,
+                    "status": session.status.upper() if session.status else None,
+                    "last_active": session.last_active.isoformat() if session.last_active else None,
+                    "data": session.data
+                }
+                for session in sessions
+            ]
+        except Exception as e:
+            logging.error(f"Error getting all sessions: {str(e)}")
+            raise
+
+    async def get_all_session_numbers(self) -> list:
+        """Return a list of all session phone numbers in the system."""
+        try:
+            query = select(Session.phone_number)
+            result = await self.db.execute(query)
+            phone_numbers = [row[0] for row in result.fetchall()]
+            return phone_numbers
+        except Exception as e:
+            logging.error(f"Error getting all session numbers: {str(e)}")
+            raise
+
     async def get_campaign_stats(self) -> Dict[str, Any]:
         """Get campaign statistics"""
         try:

@@ -13,6 +13,7 @@ import asyncio
 import time
 from app.services.waha_session import WAHASessionService
 from app.db.database import async_session
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Configure logging
 logging.basicConfig(
@@ -90,22 +91,29 @@ async def init_services():
     
     logging.info("Database initialized and background services started")
 
-async def periodic_monitor_sessions():
-    while True:
-        async with async_session() as db:
-            service = WAHASessionService(db)
-            try:
-                await service.monitor_sessions()
-            except Exception as e:
-                logging.error(f"Error in periodic monitor_sessions: {e}")
-        await asyncio.sleep(2)  # Run every 30 seconds
+scheduler = AsyncIOScheduler()
+
+async def periodic_monitor_sessions_once():
+    logging.info("[BG] periodic_monitor_sessions_once is running")
+    async with async_session() as db:
+        service = WAHASessionService(db)
+        try:
+            await service.monitor_sessions()
+        except Exception as e:
+            logging.error(f"Error in periodic monitor_sessions: {e}")
 
 @app.on_event("startup")
 async def startup_event():
     await init_services()
     await restore_sessions_on_startup()
-    # Start periodic monitor_sessions background task
-    asyncio.create_task(periodic_monitor_sessions())
+    scheduler.add_job(
+        periodic_monitor_sessions_once,
+        'interval',
+        seconds=15,
+        id='monitor_sessions_job',
+        replace_existing=True
+    )
+    scheduler.start()
     logging.info("Application started successfully")
 
 @app.on_event("shutdown")

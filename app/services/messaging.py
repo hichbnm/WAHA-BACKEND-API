@@ -4,21 +4,23 @@ from dotenv import load_dotenv
 import logging
 import json
 from typing import Optional, Dict, Any
+from app.services.waha_session import WAHASessionService
+from sqlalchemy.ext.asyncio import AsyncSession
 
 load_dotenv()
 
 class MessagingService:
-    def __init__(self):
+    def __init__(self, db: Optional[AsyncSession] = None):
+        self.db = db
         self.waha_url = f"{os.getenv('WAHA_HOST')}:{os.getenv('WAHA_PORT')}"
         self.api_key = os.getenv('WAHA_API_KEY')
         if not self.api_key:
             raise ValueError("WAHA_API_KEY environment variable is not set")
-            
-    async def _make_waha_request(self, endpoint: str, method: str = "POST", data: Dict = None) -> Dict[str, Any]:
-        """Make a request to WAHA API with proper error handling"""
-        url = f"{self.waha_url}/api/{endpoint}"
-        headers = {"X-Api-Key": self.api_key}
-        
+
+    async def _make_waha_request(self, endpoint: str, method: str = "POST", data: Dict = None, waha_url: str = None, api_key: str = None) -> Dict[str, Any]:
+        """Make a request to WAHA API with proper error handling, using per-worker credentials if provided"""
+        url = f"{(waha_url or self.waha_url)}/api/{endpoint}"
+        headers = {"X-Api-Key": api_key or self.api_key}
         try:
             async with ClientSession() as client:
                 if method == "GET":
@@ -41,7 +43,7 @@ class MessagingService:
             raise ValueError("Invalid response from WAHA API")
 
     async def send_message(self, sender_number: str, recipient: str, message: str, media_url: Optional[str] = None) -> Dict[str, Any]:
-        """Send a message with optional media"""
+        """Send a message with optional media using the correct WAHA worker for the sender_number"""
         try:
             # Remove '+' if present for WAHA chatId
             recipient_id = recipient.lstrip('+') + '@c.us'
@@ -52,13 +54,21 @@ class MessagingService:
                 "text": message
             }
             logging.info(f"Sending WAHA sendText payload: {payload}")
+
+            # --- Per-worker sharding: get correct worker for sender_number ---
+            if not self.db:
+                raise ValueError("MessagingService requires a DB session for per-worker routing.")
+            waha_service = WAHASessionService(self.db)
+            waha_url, api_key = await waha_service._get_worker_for_session(sender_number)
+
             # Send text message
             if message:
                 text_response = await self._make_waha_request(
                     "sendText",
-                    data=payload
+                    data=payload,
+                    waha_url=waha_url,
+                    api_key=api_key
                 )
-                
                 if text_response.get("error"):
                     raise ValueError(f"Failed to send text message: {text_response['error']}")
 
@@ -69,9 +79,10 @@ class MessagingService:
                     data={
                         "chatId": recipient_id,
                         "mediaUrl": media_url
-                    }
+                    },
+                    waha_url=waha_url,
+                    api_key=api_key
                 )
-                
                 if media_response.get("error"):
                     raise ValueError(f"Failed to send media: {media_response['error']}")
 
@@ -83,7 +94,6 @@ class MessagingService:
                     "media_sent": bool(media_url)
                 }
             }
-            
         except Exception as e:
             logging.error(f"Error sending message to {recipient}: {str(e)}")
             raise

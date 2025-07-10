@@ -140,6 +140,7 @@ class MessageQueue:
                                         pass
 
                                     # Send message
+                                    messaging_service = MessagingService(db_msg)
                                     result = await messaging_service.send_message(
                                         campaign.sender_number,
                                         message.recipient,

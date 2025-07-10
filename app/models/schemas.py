@@ -202,3 +202,10 @@ class WorkerUpdate(BaseModel):
     api_key: str | None = None
     capacity: int | None = None
     name: str | None = None
+
+class SessionNumbersResponse(BaseModel):
+    count: int
+    numbers: List[str]
+
+class WorkerHealthUpdate(BaseModel):
+    is_healthy: bool

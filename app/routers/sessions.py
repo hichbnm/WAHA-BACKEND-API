@@ -19,7 +19,7 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     admin_token: Optional[str] = Depends(get_optional_admin_token)
 ):
-    """List all sessions"""
+    """List all active sessions"""
     waha_service = WAHASessionService(db)
     try:
         sessions = await waha_service.list_sessions()

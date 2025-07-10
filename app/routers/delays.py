@@ -16,7 +16,7 @@ def normalize_number(number: str) -> str:
 
 @router.get("/delays", tags=["admin"])
 def get_delays(admin_token: str = Depends(verify_admin_token)):
-    """Get current message and sender switch delays (admin only)"""
+    """Get current message and sender switch delays globally (admin only)"""
     return {
         "MESSAGE_DELAY": int(os.getenv("MESSAGE_DELAY", 2)),
         "SENDER_SWITCH_DELAY": int(os.getenv("SENDER_SWITCH_DELAY", 5))
@@ -28,7 +28,7 @@ def set_delays(
     sender_switch_delay: int = None,
     admin_token: str = Depends(verify_admin_token)
 ):
-    """Set message and sender switch delays (admin only)"""
+    """Set message and sender switch delays for global system (admin only)"""
     if message_delay is not None:
         os.environ["MESSAGE_DELAY"] = str(message_delay)
     if sender_switch_delay is not None:
@@ -38,8 +38,9 @@ def set_delays(
         "SENDER_SWITCH_DELAY": int(os.getenv("SENDER_SWITCH_DELAY", 5))
     }
 
-@router.get("/user-delays", tags=["user"], include_in_schema=True)
+@router.get("/user-delays", include_in_schema=True)
 def get_user_delays(sender_number: str = Query(...)):
+    """Get message and sender switch delays per user """
     sender_number = normalize_number(sender_number)
     with _user_delays_lock:
         user_delay = _user_delays.get(sender_number)
@@ -51,12 +52,13 @@ def get_user_delays(sender_number: str = Query(...)):
         "SENDER_SWITCH_DELAY": int(os.getenv("SENDER_SWITCH_DELAY", 5))
     }
 
-@router.post("/user-delays", tags=["user"], include_in_schema=True)
+@router.post("/user-delays", include_in_schema=True)
 def set_user_delays(
     sender_number: str = Query(...),
     message_delay: int = None,
     sender_switch_delay: int = None
 ):
+    """Set message and sender switch delays for a specific user"""
     sender_number = normalize_number(sender_number)
     with _user_delays_lock:
         user_delay = _user_delays.get(sender_number) or {

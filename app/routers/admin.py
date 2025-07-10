@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Path, Body, HTTPException
 from typing import List
 from app.models import schemas
 from app.services.admin import AdminService
 from app.utils.auth import verify_admin_token
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
+from app.models.models import Worker
+from sqlalchemy import select
 
 router = APIRouter()
 
@@ -43,3 +45,29 @@ async def list_active_sessions(
     """List all active WhatsApp sessions (admin only)"""
     admin_service = AdminService(db)
     return await admin_service.get_active_sessions()
+
+@router.get("/session-numbers", response_model=schemas.SessionNumbersResponse)
+async def list_all_session_numbers(
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_admin_token)
+):
+    """List all session phone numbers in the system (admin only). Returns a dict with count and numbers."""
+    admin_service = AdminService(db)
+    numbers = await admin_service.get_all_session_numbers()
+    return {"count": len(numbers), "numbers": numbers}
+
+@router.put("/workers/{worker_id}/health", response_model=schemas.WorkerHealthUpdate)
+async def update_worker_health(
+    worker_id: int = Path(..., description="ID of the worker to update"),
+    health: schemas.WorkerHealthUpdate = Body(...),
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_admin_token)
+):
+    """Update the health status (is_healthy) of a worker (admin only)"""
+    result = await db.execute(select(Worker).where(Worker.id == worker_id))
+    worker = result.scalar_one_or_none()
+    if not worker:
+        raise HTTPException(status_code=404, detail=f"Worker {worker_id} not found")
+    worker.is_healthy = health.is_healthy
+    await db.commit()
+    return health

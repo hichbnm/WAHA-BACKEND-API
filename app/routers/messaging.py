@@ -21,8 +21,11 @@ async def create_campaign(
     campaign.sender_number = normalize_number(campaign.sender_number)
     campaign.recipients = [normalize_number(r) for r in campaign.recipients]
     campaign_service = CampaignService(db)
-    result = await campaign_service.create_campaign(campaign)
-    return result
+    try:
+        result = await campaign_service.create_campaign(campaign)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/status/{campaign_id}", response_model=schemas.CampaignStatus)
 async def get_campaign_status(
@@ -84,12 +87,3 @@ async def get_system_metrics(
     sender_number = normalize_number(sender_number)
     campaign_service = CampaignService(db)
     return await campaign_service.get_system_metrics(sender_number=sender_number)
-
-@router.get("/users", response_model=List[schemas.UserStats])
-async def list_users(
-    admin_token: str = Depends(verify_admin_token),
-    db: AsyncSession = Depends(get_db)
-):
-    """List all users/senders in the system (admin only)"""
-    campaign_service = CampaignService(db)
-    return await campaign_service.get_user_stats()
