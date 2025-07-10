@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from app.models.models import Session
 from app.services.waha_session import WAHASessionService
+import os 
+from dotenv import load_dotenv
+load_dotenv()
 
 class SessionMonitor:
     def __init__(self, db_pool):
@@ -93,4 +96,6 @@ class SessionMonitor:
                             continue
             except Exception as e:
                 logging.error(f"Error in session monitor: {str(e)}")
-            await asyncio.sleep(30)  # 30 seconds
+            session_lifetime_seconds_check_interval = int(os.getenv("SESSION_LIFETIME_SECONDS_CHECK_INTERVAL", 30))
+            await asyncio.sleep(session_lifetime_seconds_check_interval)  # 30 seconds
+
