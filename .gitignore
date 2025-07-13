@@ -12,7 +12,6 @@ env/
 
 # --- Environment Variables ---
 .env
-.env.*
 
 # --- Logs ---
 logs/

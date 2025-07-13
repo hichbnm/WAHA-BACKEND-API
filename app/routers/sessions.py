@@ -19,7 +19,7 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     admin_token: Optional[str] = Depends(get_optional_admin_token)
 ):
-    """List all active sessions"""
+    """List all sessions"""
     waha_service = WAHASessionService(db)
     try:
         sessions = await waha_service.list_sessions()
@@ -64,8 +64,16 @@ async def start_session(
         result = await waha_service.start_session(phone_number)
         return result
     except Exception as e:
-        logging.error(f"Error starting session {phone_number}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        if (
+            isinstance(e, HTTPException)
+            and getattr(e, 'status_code', None) == 503
+            and "No available WAHA worker found for new session" in str(e.detail)
+        ):
+            logging.info(f"Info starting session {phone_number}: {str(e)}")
+            raise e
+        else:
+            logging.error(f"Error starting session {phone_number}: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{phone_number}/stop", response_model=schemas.SessionInfo)
 async def stop_session(

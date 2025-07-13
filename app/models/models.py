@@ -36,6 +36,7 @@ class Message(Base):
     error = Column(String, nullable=True)
     sent_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
+    waha_message_id = Column(String, nullable=True, index=True)  # Add this line
     
     campaign = relationship("Campaign", back_populates="messages")
 

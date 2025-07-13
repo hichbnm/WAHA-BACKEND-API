@@ -1,4 +1,6 @@
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 from collections import deque
 from datetime import datetime, timedelta
 import logging
@@ -31,6 +33,9 @@ class MessageQueue:
             cls._instance.processing_task = None
             cls._instance.worker_tasks = []  # Store worker tasks
             cls._instance.num_workers = 4  # Default to 4 workers
+            # Remove static campaign_delay, always read from env
+            cls._instance.last_campaign_time: Dict[str, datetime] = {}  # Last campaign completion time per sender
+            cls._instance.active_senders: Set[str] = set()  # Senders currently being processed
         return cls._instance
 
     async def start_processing(self, db_pool, num_workers: int = None):
@@ -38,6 +43,14 @@ class MessageQueue:
         if not self.processing:
             self.processing = True
             self.db_pool = db_pool
+            # --- Add campaigns with pending messages to the queue on startup ---
+            async with AsyncSession(db_pool) as db:
+                query = select(Message.campaign_id, Campaign.sender_number).join(Campaign).where(Message.status == "PENDING")
+                result = await db.execute(query)
+                campaigns = set(result.fetchall())
+                for campaign_id, sender_number in campaigns:
+                    await self.add_campaign(campaign_id, sender_number)
+            # --- End patch ---
             if num_workers is not None:
                 self.num_workers = num_workers
             self.worker_tasks = [asyncio.create_task(self._process_queue(db_pool)) for _ in range(self.num_workers)]
@@ -96,9 +109,29 @@ class MessageQueue:
                 campaign_id = None
                 sender_number = None
                 async with self._lock:
-                    if self.queue:
-                        campaign_id, sender_number = self.queue.popleft()
+                    # --- PATCH: Find next campaign that respects campaign delay and is not already active ---
+                    for idx, (cid, s_number) in enumerate(self.queue):
+                        # Only process if sender is not already active
+                        if s_number in self.active_senders:
+                            continue
+                        # Always read campaign delay from env
+                        campaign_delay = int(os.getenv('CAMPAIGN_DELAY', '10'))
+                        with _user_delays_lock:
+                            user_delay = _user_delays.get(s_number)
+                        if user_delay and "CAMPAIGN_DELAY" in user_delay:
+                            campaign_delay = int(user_delay["CAMPAIGN_DELAY"])
+                        last_campaign_time = self.last_campaign_time.get(s_number)
+                        now = datetime.utcnow()
+                        if last_campaign_time:
+                            elapsed = (now - last_campaign_time).total_seconds()
+                            if elapsed < campaign_delay:
+                                continue  # Not ready yet
+                        # Found a campaign that can be processed
+                        campaign_id, sender_number = cid, s_number
+                        self.queue.remove((cid, s_number))
                         self.active_campaigns.add(campaign_id)
+                        self.active_senders.add(sender_number)
+                        break
 
                 if campaign_id:
                     try:
@@ -148,10 +181,16 @@ class MessageQueue:
                                         final_message,
                                         campaign.media_url
                                     )
-
-                                    # Update message status
+                                    # Update message status and WAHA message ID
                                     message.status = "SENT"
                                     message.sent_at = datetime.utcnow()
+                                    message.delivered_at = message.sent_at  # Always set delivered_at to sent_at
+                                    # Only save a string to waha_message_id
+                                    waha_id = result["details"].get("waha_message_id")
+                                    if isinstance(waha_id, dict):
+                                        message.waha_message_id = waha_id.get("_serialized") or waha_id.get("id")
+                                    else:
+                                        message.waha_message_id = waha_id
                                     campaign.sent_messages += 1
                                     await db_msg.commit()
 
@@ -191,6 +230,18 @@ class MessageQueue:
                             if campaign.failed_messages > 0:
                                 campaign.status = "COMPLETED_WITH_ERRORS"
                             await db_final.commit()
+                        # --- PATCH: Update last campaign time for sender ---
+                        self.last_campaign_time[sender_number] = datetime.utcnow()
+                        # --- PATCH: Enforce campaign delay strictly after completion ---
+                        campaign_delay = int(os.getenv('CAMPAIGN_DELAY', '10'))
+                        with _user_delays_lock:
+                            user_delay = _user_delays.get(sender_number)
+                        if user_delay and "CAMPAIGN_DELAY" in user_delay:
+                            campaign_delay = int(user_delay["CAMPAIGN_DELAY"])
+                        await asyncio.sleep(campaign_delay)
+                        # --- PATCH: Mark sender as inactive so next campaign can start ---
+                        async with self._lock:
+                            self.active_senders.discard(sender_number)
 
                     except Exception as e:
                         logging.error(f"Error processing campaign {campaign_id}: {str(e)}")
@@ -224,6 +275,7 @@ class MessageQueue:
         if self.last_send_time:
             last_sender = max(self.last_send_time.items(), key=lambda x: x[1])[0]
         if last_sender and last_sender != sender_number:
+            await asyncio.sleep(sender_switch_delay)
             await asyncio.sleep(sender_switch_delay)
         # Check if we need to apply message delay
         if sender_number in self.last_send_time:

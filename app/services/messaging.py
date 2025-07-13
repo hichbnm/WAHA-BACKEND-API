@@ -1,26 +1,22 @@
 from aiohttp import ClientSession, ClientError
-import os
-from dotenv import load_dotenv
 import logging
 import json
 from typing import Optional, Dict, Any
 from app.services.waha_session import WAHASessionService
+from app.services.message_utils import update_last_active
 from sqlalchemy.ext.asyncio import AsyncSession
-
-load_dotenv()
 
 class MessagingService:
     def __init__(self, db: Optional[AsyncSession] = None):
         self.db = db
-        self.waha_url = f"{os.getenv('WAHA_HOST')}:{os.getenv('WAHA_PORT')}"
-        self.api_key = os.getenv('WAHA_API_KEY')
-        if not self.api_key:
-            raise ValueError("WAHA_API_KEY environment variable is not set")
+        # No waha_url or api_key from env; always use per-worker credentials
 
     async def _make_waha_request(self, endpoint: str, method: str = "POST", data: Dict = None, waha_url: str = None, api_key: str = None) -> Dict[str, Any]:
-        """Make a request to WAHA API with proper error handling, using per-worker credentials if provided"""
-        url = f"{(waha_url or self.waha_url)}/api/{endpoint}"
-        headers = {"X-Api-Key": api_key or self.api_key}
+        """Make a request to WAHA API with proper error handling, using per-worker credentials (required)"""
+        if not waha_url or not api_key:
+            raise ValueError("waha_url and api_key must be provided from worker DB for WAHA API calls.")
+        url = f"{waha_url}/api/{endpoint}"
+        headers = {"X-Api-Key": api_key}
         try:
             async with ClientSession() as client:
                 if method == "GET":
@@ -61,6 +57,7 @@ class MessagingService:
             waha_service = WAHASessionService(self.db)
             waha_url, api_key = await waha_service._get_worker_for_session(sender_number)
 
+            waha_message_id = None
             # Send text message
             if message:
                 text_response = await self._make_waha_request(
@@ -71,6 +68,7 @@ class MessagingService:
                 )
                 if text_response.get("error"):
                     raise ValueError(f"Failed to send text message: {text_response['error']}")
+                waha_message_id = text_response.get("id")
 
             # Send media if provided
             if media_url:
@@ -85,13 +83,19 @@ class MessagingService:
                 )
                 if media_response.get("error"):
                     raise ValueError(f"Failed to send media: {media_response['error']}")
+                if not waha_message_id:
+                    waha_message_id = media_response.get("id")
+
+            # Update last_active after successful send
+            await update_last_active(self.db, sender_number)
 
             return {
                 "status": "success",
                 "message": "Message sent successfully",
                 "details": {
                     "text_sent": bool(message),
-                    "media_sent": bool(media_url)
+                    "media_sent": bool(media_url),
+                    "waha_message_id": waha_message_id
                 }
             }
         except Exception as e:

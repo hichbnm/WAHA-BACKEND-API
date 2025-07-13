@@ -97,5 +97,4 @@ class SessionMonitor:
             except Exception as e:
                 logging.error(f"Error in session monitor: {str(e)}")
             session_lifetime_seconds_check_interval = int(os.getenv("SESSION_LIFETIME_SECONDS_CHECK_INTERVAL", 30))
-            await asyncio.sleep(session_lifetime_seconds_check_interval)  # 30 seconds
-
+            await asyncio.sleep(session_lifetime_seconds_check_interval)

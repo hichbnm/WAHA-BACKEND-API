@@ -54,7 +54,16 @@ async def get_db():
             await session.commit()
         except Exception as e:
             await session.rollback()
-            logging.error(f"Database session error: {str(e)}")
+            if (
+                isinstance(e, Exception)
+                and (
+                    "No available WAHA worker found for new session" in str(e)
+                    or "WhatsApp session not connected. Please scan QR code to authenticate." in str(e)
+                )
+            ):
+                logging.info(f"Database session info: {str(e)}")
+            else:
+                logging.error(f"Database session error: {str(e)}")
             raise
         finally:
             await session.close()

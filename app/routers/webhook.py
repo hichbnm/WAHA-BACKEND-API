@@ -105,13 +105,33 @@ async def handle_message_ack(payload: Dict[str, Any], db: AsyncSession):
     """Handle message delivery acknowledgment"""
     try:
         # Extract ack details
-        message_id = payload.get("id")
+        message_id_raw = payload.get("id")
         status = payload.get("ack")  # -1: pending, 0: sent, 1: delivered, 2: read
-        
-        # Update message status in database
-        # Implement based on your needs
-        
-        logging.info(f"Message {message_id} status updated to: {status}")
+
+        # Update message status in database using waha_message_id
+        from sqlalchemy import select
+        from app.models.models import Message
+        result = await db.execute(select(Message).where(Message.waha_message_id == message_id_raw))
+        message = result.scalar_one_or_none()
+        if message:
+            # Always set delivered_at to sent_at, regardless of status
+            message.delivered_at = message.sent_at
+            if status == 1:  # delivered
+                message.status = "DELIVERED"
+                await db.commit()
+                logging.info(f"Message {message_id_raw} marked as DELIVERED at {message.delivered_at}")
+            elif status == 2:  # read
+                message.status = "READ"
+                await db.commit()
+                logging.info(f"Message {message_id_raw} marked as READ")
+            elif status == 0:  # sent
+                message.status = "SENT"
+                await db.commit()
+                logging.info(f"Message {message_id_raw} marked as SENT")
+            else:
+                logging.info(f"Message {message_id_raw} ack status: {status}")
+        else:
+            logging.warning(f"Message with WAHA ID {message_id_raw} not found for ack update.")
     except Exception as e:
         logging.error(f"Error handling message ack: {str(e)}")
 

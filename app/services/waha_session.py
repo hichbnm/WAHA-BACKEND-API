@@ -15,10 +15,7 @@ from fastapi import HTTPException
 class WAHASessionService:
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.waha_url = f"{os.getenv('WAHA_HOST')}:{os.getenv('WAHA_PORT')}"
-        self.api_key = os.getenv('WAHA_API_KEY')
-        if not self.api_key:
-            raise ValueError("WAHA_API_KEY environment variable is not set")
+        # Removed self.waha_url and self.api_key; always use worker's values from DB
         # Round-robin queue: user_id -> deque of (phone_number, future)
         self.session_start_queues = defaultdict(deque)
         self.queue_users = deque()  # Keeps round-robin order of users with pending requests
@@ -26,11 +23,12 @@ class WAHASessionService:
         self.processing_queue = False
 
     async def _make_waha_request(self, endpoint: str, method: str = "GET", data: Dict = None, expect_json: bool = True, waha_url: str = None, api_key: str = None) -> Any:
-        """Make a request to WAHA API"""
-        url = f"{(waha_url or self.waha_url)}/api/{endpoint}"
-        headers = {"X-Api-Key": api_key or self.api_key}
-        logging.info(f"WAHA REQUEST: {method} {url} data={data}")  # <--- Add this line for debug
-        
+        """Make a request to WAHA API. waha_url and api_key are required (from worker DB)."""
+        if not waha_url or not api_key:
+            raise ValueError("waha_url and api_key must be provided from worker DB for WAHA API calls.")
+        url = f"{waha_url}/api/{endpoint}"
+        headers = {"X-Api-Key": api_key}
+        logging.info(f"WAHA REQUEST: {method} {url} data={data}")
         async with aiohttp.ClientSession() as session:
             try:
                 if method == "GET":
@@ -38,16 +36,12 @@ class WAHASessionService:
                         if response.status == 401:
                             raise ValueError("Unauthorized: Invalid WAHA API key")
                         if response.status == 404:
-                            # Do not log as error, let caller handle
                             raise ValueError("Not Found")
                         response.raise_for_status()
-                        
                         if expect_json:
                             return await response.json()
                         else:
-                            # Return raw response content for non-JSON responses
                             return await response.read()
-                            
                 elif method == "POST":
                     async with session.post(url, json=data, headers=headers) as response:
                         if response.status == 401:
@@ -59,7 +53,6 @@ class WAHASessionService:
                         if response.status == 401:
                             raise ValueError("Unauthorized: Invalid WAHA API key")
                         response.raise_for_status()
-                        # PATCH: Handle empty or non-JSON response gracefully
                         content_type = response.headers.get('Content-Type', '')
                         text = await response.text()
                         if not text.strip():
@@ -77,65 +70,39 @@ class WAHASessionService:
                     raise ValueError("Invalid response from WAHA API")
                 return None
 
-    async def start_session(self, phone_number: str, user_id: str = None) -> Dict[str, Any]:
+    async def start_session(self, phone_number: str, user_id: str = None, worker: 'Worker' = None) -> Dict[str, Any]:
         """Start a new WhatsApp session, enforcing max live session limit and round-robin queueing by user, and assign to a worker."""
-        from app.config import settings
-        from sqlalchemy import select
-        from app.services.worker import WorkerService
+        from sqlalchemy import select, func
         from app.models.models import WAHASession
-        # Remove global live session count check here
-        try:
-            # Remove '+' prefix if present
-            clean_number = phone_number.replace('+', '')
-            response = None
-
-            # --- SHARDING LOGIC: Use existing worker if WAHASession exists ---
-            wahasession_stmt = select(WAHASession).where(WAHASession.phone_number == clean_number)
-            wahasession_result = await self.db.execute(wahasession_stmt)
-            wahasession = wahasession_result.scalar_one_or_none()
-            if wahasession:
-                # Use the same worker as before
-                from app.models.models import Worker
-                worker_stmt = select(Worker).where(Worker.id == wahasession.worker_id)
-                worker_result = await self.db.execute(worker_stmt)
-                best_worker = worker_result.scalar_one_or_none()
-                # --- FIX: Only use previous worker if still healthy ---
-                if not best_worker or not best_worker.is_healthy:
-                    # Select a new healthy worker
-                    from app.services.worker import WorkerService
-                    worker_service = WorkerService(self.db)
-                    best_worker = await worker_service.get_available_worker()
-                    if not best_worker:
-                        raise HTTPException(status_code=503, detail="No available WAHA worker found for existing session (previous worker unhealthy or missing).")
-                    # --- UPDATE EXISTING WAHASession TO NEW WORKER ---
-                    wahasession.worker_id = best_worker.id
-                    await self.db.commit()
-            else:
-                # Assign to best available worker
-                worker_service = WorkerService(self.db)
-                best_worker = await worker_service.get_available_worker()
-                if not best_worker:
-                    raise HTTPException(status_code=503, detail="No available WAHA worker found for new session.")
-            waha_url = best_worker.url
-            api_key = best_worker.api_key
-
-            # --- ENFORCE MAX_LIVE_SESSIONS PER WORKER ---
-            from app.models.models import WAHASession
-            from sqlalchemy import select, func
-            session_count_result = await self.db.execute(
+        # ENFORCE MAX WORKING SESSIONS PER WORKER (queue logic)
+        # This block is only used if a specific worker is provided (for queue processor)
+        if worker is not None:
+            max_working = worker.capacity if hasattr(worker, 'capacity') and worker.capacity else int(os.getenv("MAX_LIVE_SESSIONS", 1))
+            working_sessions_result = await self.db.execute(
                 select(func.count()).select_from(WAHASession).where(
-                    WAHASession.worker_id == best_worker.id,
-                    WAHASession.status.in_(["CONNECTED", "WORKING"])
+                    WAHASession.worker_id == worker.id,
+                    WAHASession.status == "WORKING"
                 )
             )
-            live_sessions_on_worker = session_count_result.scalar() or 0
-            max_live = int(os.getenv("MAX_LIVE_SESSIONS", 100))
-            if live_sessions_on_worker >= max_live:
+            working_sessions_on_worker = working_sessions_result.scalar() or 0
+            if working_sessions_on_worker >= max_working:
                 # Queue the request by user and return queued status
                 loop = asyncio.get_event_loop()
-                future = loop.create_future()
                 user_key = user_id or "anonymous"
                 async with self.queue_lock:
+                    already_queued = any(
+                        queued_phone == phone_number
+                        for queued_phone, _ in self.session_start_queues[user_key]
+                    )
+                    if already_queued:
+                        return {
+                            "phone_number": phone_number,
+                            "status": "QUEUED",
+                            "message": f"Session start request already queued for user {user_key}.",
+                            "last_active": None,
+                            "data": None
+                        }
+                    future = loop.create_future()
                     self.session_start_queues[user_key].append((phone_number, future))
                     if user_key not in self.queue_users:
                         self.queue_users.append(user_key)
@@ -145,10 +112,205 @@ class WAHASessionService:
                 return {
                     "phone_number": phone_number,
                     "status": "QUEUED",
-                    "message": f"Session start request queued. Will be processed when a slot is available on worker {best_worker.id}.",
+                    "message": f"Session start request queued. Will be processed when a WORKING slot is available on worker {worker.id}.",
                     "last_active": None,
                     "data": None
                 }
+
+        from sqlalchemy import select
+        from app.services.worker import WorkerService
+        from app.models.models import WAHASession, Worker
+        try:
+            clean_number = phone_number.replace('+', '')
+            response = None
+
+            # --- SHARDING LOGIC: Use existing worker if WAHASession exists ---
+            wahasession_stmt = select(WAHASession).where(WAHASession.phone_number == clean_number)
+            wahasession_result = await self.db.execute(wahasession_stmt)
+            wahasession = wahasession_result.scalar_one_or_none()
+            if wahasession:
+                # Use the same worker as before
+                worker_stmt = select(Worker).where(Worker.id == wahasession.worker_id)
+                worker_result = await self.db.execute(worker_stmt)
+                best_worker = worker_result.scalar_one_or_none()
+                # --- FIX: Only use previous worker if still healthy ---
+                # If previous worker is not healthy, try to assign to any available worker
+                if not best_worker or not best_worker.is_healthy:
+                    # Find any healthy worker with available slot
+                    from sqlalchemy import func
+                    workers_result = await self.db.execute(select(Worker).where(Worker.is_healthy == True))
+                    workers = workers_result.scalars().all()
+                    best_worker = None
+                    for worker_obj in workers:
+                        total_sessions_result = await self.db.execute(
+                            select(func.count()).select_from(WAHASession).where(
+                                WAHASession.worker_id == worker_obj.id
+                            )
+                        )
+                        total_sessions = total_sessions_result.scalar() or 0
+                        max_capacity = worker_obj.capacity if hasattr(worker_obj, 'capacity') and worker_obj.capacity else int(os.getenv("MAX_LIVE_SESSIONS", 1))
+                        if total_sessions < max_capacity:
+                            best_worker = worker_obj
+                            wahasession.worker_id = best_worker.id
+                            await self.db.commit()
+                            break
+                    if not best_worker:
+                        return {
+                            "phone_number": phone_number,
+                            "status": "REJECTED",
+                            "message": "All workers are at capacity. Cannot restart session for this number.",
+                            "last_active": None,
+                            "data": None
+                        }
+                waha_url = best_worker.url
+                api_key = best_worker.api_key
+
+                # --- NEW PATCH: Check WAHA backend real status ---
+                try:
+                    session_check = await self._make_waha_request(f"sessions/{clean_number}", waha_url=waha_url, api_key=api_key)
+                    session_exists = session_check and not session_check.get("error")
+                    session_status = session_check.get("status") if session_exists else None
+                except Exception as e:
+                    session_exists = False
+                    session_status = None
+                # If DB says WORKING but WAHA backend is not running, force restart
+                if wahasession.status in ["WORKING", "CONNECTED"] and (not session_exists or session_status not in ["WORKING", "CONNECTED"]):
+                    # Attempt to restart session
+                    create_response = await self._make_waha_request(
+                        "sessions",
+                        method="POST",
+                        data={
+                            "name": clean_number,
+                            "config": {
+                                "proxy": None,
+                                "webhookUrl": f"{os.getenv('API_HOST')}:{os.getenv('API_PORT')}/api/webhook"
+                            }
+                        },
+                        waha_url=waha_url,
+                        api_key=api_key
+                    )
+                    wahasession.status = "STARTING"
+                    await self.db.commit()
+                    return {
+                        "phone_number": clean_number,
+                        "status": "STARTING",
+                        "message": "Session was marked active in DB but not running on WAHA backend. Restarting session.",
+                        "last_active": wahasession.last_active,
+                        "data": create_response
+                    }
+                best_worker = best_worker
+            else:
+                # --- GLOBAL WORKER CAPACITY CHECK ---
+                from sqlalchemy import func
+                workers_result = await self.db.execute(select(Worker).where(Worker.is_healthy == True))
+                workers = workers_result.scalars().all()
+                available_worker = None
+                for worker_obj in workers:
+                    total_sessions_result = await self.db.execute(
+                        select(func.count()).select_from(WAHASession).where(
+                            WAHASession.worker_id == worker_obj.id
+                        )
+                    )
+                    total_sessions = total_sessions_result.scalar() or 0
+                    max_capacity = worker_obj.capacity if hasattr(worker_obj, 'capacity') and worker_obj.capacity else int(os.getenv("MAX_LIVE_SESSIONS", 1))
+                    if total_sessions < max_capacity:
+                        available_worker = worker_obj
+                        break
+                if not available_worker:
+                    return {
+                        "phone_number": phone_number,
+                        "status": "REJECTED",
+                        "message": "All workers are at capacity. No new sessions can be registered.",
+                        "last_active": None,
+                        "data": None
+                    }
+                best_worker = worker if worker is not None else available_worker
+                waha_url = best_worker.url
+                api_key = best_worker.api_key
+
+
+            # --- ENFORCE MAX_LIVE_SESSIONS PER WORKER ---
+            from app.models.models import WAHASession
+            from sqlalchemy import select, func
+            # Check if session for this phone_number is already active on this worker
+            existing_active_stmt = select(WAHASession).where(
+                WAHASession.worker_id == best_worker.id,
+                WAHASession.phone_number == clean_number,
+                WAHASession.status.in_(["CONNECTED", "WORKING"])
+            )
+            existing_active_result = await self.db.execute(existing_active_stmt)
+            existing_active_session = existing_active_result.scalar_one_or_none()
+            if existing_active_session:
+                # Session is already active, return its info
+                return {
+                    "phone_number": clean_number,
+                    "status": existing_active_session.status,
+                    "message": "Session already active on worker.",
+                    "last_active": existing_active_session.last_active,
+                    "data": existing_active_session.data
+                }
+
+            # If this is a restart (WAHASession exists and is STOPPED), enforce MAX_LIVE_SESSIONS for WORKING sessions
+            if wahasession and wahasession.status == "STOPPED":
+                # Count WORKING sessions for this worker
+                working_sessions_result = await self.db.execute(
+                    select(func.count()).select_from(WAHASession).where(
+                        WAHASession.worker_id == best_worker.id,
+                        WAHASession.status == "WORKING"
+                    )
+                )
+                working_sessions_on_worker = working_sessions_result.scalar() or 0
+                max_live = int(os.getenv("MAX_LIVE_SESSIONS", 100))
+                if working_sessions_on_worker >= max_live:
+                    # Queue the restart request
+                    loop = asyncio.get_event_loop()
+                    user_key = user_id or "anonymous"
+                    async with self.queue_lock:
+                        already_queued = any(
+                            queued_phone == phone_number
+                            for queued_phone, _ in self.session_start_queues[user_key]
+                        )
+                        if already_queued:
+                            return {
+                                "phone_number": phone_number,
+                                "status": "QUEUED",
+                                "message": f"Session restart request already queued for user {user_key}.",
+                                "last_active": None,
+                                "data": None
+                            }
+                        future = loop.create_future()
+                        self.session_start_queues[user_key].append((phone_number, future))
+                        if user_key not in self.queue_users:
+                            self.queue_users.append(user_key)
+                        if not self.processing_queue:
+                            loop.create_task(self._process_session_queue())
+                            self.processing_queue = True
+                    return {
+                        "phone_number": phone_number,
+                        "status": "QUEUED",
+                        "message": f"Session restart request queued. Will be processed when a WORKING slot is available on worker {best_worker.id}.",
+                        "last_active": None,
+                        "data": None
+                    }
+                # else: allow restart
+            else:
+                # Count only WORKING and CONNECTED sessions for this worker
+                active_sessions_result = await self.db.execute(
+                    select(func.count()).select_from(WAHASession).where(
+                        WAHASession.worker_id == best_worker.id,
+                        WAHASession.status.in_(["WORKING", "CONNECTED"])
+                    )
+                )
+                active_sessions_on_worker = active_sessions_result.scalar() or 0
+                max_live = int(os.getenv("MAX_LIVE_SESSIONS", 100))
+                if active_sessions_on_worker >= max_live:
+                    return {
+                        "phone_number": phone_number,
+                        "status": "REJECTED",
+                        "message": f"Session slot limit exceeded for worker {best_worker.id}. No new sessions can be registered.",
+                        "last_active": None,
+                        "data": None
+                    }
 
             # First, check if the session already exists in WAHA (on the selected worker)
             try:
@@ -163,15 +325,19 @@ class WAHASessionService:
                     session_exists = False
 
             if not session_exists:
+                # Build config dict without proxy if not set
+                config = {
+                    "webhookUrl": f"{os.getenv('API_HOST')}:{os.getenv('API_PORT')}/api/webhook"
+                }
+                proxy = os.getenv("PROXY")
+                if proxy is not None and proxy != "":
+                    config["proxy"] = proxy
                 create_response = await self._make_waha_request(
                     "sessions",
                     method="POST",
                     data={
                         "name": clean_number,
-                        "config": {
-                            "proxy": None,
-                            "webhookUrl": f"{os.getenv('API_HOST')}:{os.getenv('API_PORT')}/api/webhook"
-                        }
+                        "config": config
                     },
                     waha_url=waha_url,
                     api_key=api_key
@@ -247,18 +413,23 @@ class WAHASessionService:
                 "data": response
             }
         except Exception as e:
-            logging.error(f"Error starting session: {str(e)}")
-            await self.db.rollback()
-            raise
-        except Exception as e:
-            logging.error(f"Error starting session: {str(e)}")
-            await self.db.rollback()
-            raise
+            if (
+                isinstance(e, HTTPException)
+                and getattr(e, 'status_code', None) == 503
+                and "No available WAHA worker found for new session" in str(e.detail)
+            ):
+                logging.info(f"Info starting session: {str(e)}")
+                raise e  # Return 503 as is, do not wrap as 500
+            else:
+                logging.error(f"Error starting session: {str(e)}")
+                await self.db.rollback()
+                raise
 
     async def _process_session_queue(self):
-        """Process queued session start requests in round-robin by user"""
-        from sqlalchemy import select
+        """Process queued session start requests in round-robin by user, checking all available workers for open slots"""
+        from sqlalchemy import select, func
         from app.db.database import async_session
+        from app.models.models import Worker, WAHASession
         import logging
         logging.info("[QUEUE] Session queue processor started.")
         while self.queue_users:
@@ -281,53 +452,58 @@ class WAHASessionService:
                     break
             # Use a fresh DB session for each queue operation
             async with async_session() as session:
-                # --- Determine the worker for this phone_number ---
-                from sqlalchemy import select, func
-                from app.models.models import WAHASession, Worker
                 clean_number = phone_number.replace('+', '')
-                wahasession_stmt = select(WAHASession).where(WAHASession.phone_number == clean_number)
-                wahasession_result = await session.execute(wahasession_stmt)
-                wahasession = wahasession_result.scalar_one_or_none()
-                if wahasession:
-                    worker_id = wahasession.worker_id
-                else:
-                    # Assign to best available worker (same as in start_session)
-                    from app.services.worker import WorkerService
-                    worker_service = WorkerService(session)
-                    best_worker = await worker_service.get_available_worker()
-                    if not best_worker:
-                        logging.info(f"[QUEUE] No available worker for {phone_number}, requeuing.")
-                        async with self.queue_lock:
-                            self.session_start_queues[user_key].appendleft((phone_number, future))
-                            if user_key not in self.queue_users:
-                                self.queue_users.appendleft(user_key)
-                        continue
-                    worker_id = best_worker.id
-                # Count live sessions for this worker only
-                session_count_result = await session.execute(
-                    select(func.count()).select_from(WAHASession).where(
-                        WAHASession.worker_id == worker_id,
+                # --- Check if session is already active on any worker ---
+                active_session_result = await session.execute(
+                    select(WAHASession).where(
+                        WAHASession.phone_number == clean_number,
                         WAHASession.status.in_(["CONNECTED", "WORKING"])
                     )
                 )
-                live_sessions_on_worker = session_count_result.scalar() or 0
-                max_live = int(os.getenv("MAX_LIVE_SESSIONS", 100))
-                logging.info(f"[QUEUE] Live sessions on worker {worker_id}: {live_sessions_on_worker}/{max_live} (processing {phone_number})")
-                if live_sessions_on_worker < max_live:
-                    # Slot available, start session
-                    try:
-                        waha_service = WAHASessionService(session)
-                        session_info = await waha_service.start_session(phone_number, user_id=user_key)
-                        logging.info(f"[QUEUE] Started session for {phone_number} (user {user_key})")
-                        if not future.done():
-                            future.set_result(session_info)
-                    except Exception as e:
-                        logging.error(f"[QUEUE] Failed to start session for {phone_number}: {e}")
-                        if not future.done():
-                            future.set_exception(e)
-                else:
+                active_session = active_session_result.scalar_one_or_none()
+                if active_session:
+                    logging.info(f"[QUEUE] Session {clean_number} already active on worker {active_session.worker_id}, skipping queue assignment.")
+                    if not future.done():
+                        future.set_result({
+                            "phone_number": clean_number,
+                            "status": active_session.status,
+                            "message": f"Session already active on worker {active_session.worker_id}.",
+                            "last_active": active_session.last_active,
+                            "data": active_session.data
+                        })
+                    continue
+                # --- Check all available healthy workers for open slots (capacity) ---
+                workers_result = await session.execute(select(Worker).where(Worker.is_healthy == True))
+                workers = workers_result.scalars().all()
+                assigned = False
+                for worker in workers:
+                    # Count only active sessions (CONNECTED, WORKING) for this worker
+                    active_sessions_result = await session.execute(
+                        select(func.count()).select_from(WAHASession).where(
+                            WAHASession.worker_id == worker.id,
+                            WAHASession.status.in_(["CONNECTED", "WORKING"])
+                        )
+                    )
+                    live_sessions_on_worker = active_sessions_result.scalar() or 0
+                    max_live = worker.capacity if worker.capacity else int(os.getenv("MAX_LIVE_SESSIONS", 100))
+                    logging.info(f"[QUEUE] Active sessions on worker {worker.id}: {live_sessions_on_worker}/{max_live} (processing {phone_number})")
+                    if live_sessions_on_worker < max_live:
+                        # Slot available, start session on this worker
+                        try:
+                            waha_service = WAHASessionService(session)
+                            session_info = await waha_service.start_session(phone_number, user_id=user_key, worker=worker)
+                            logging.info(f"[QUEUE] Started session for {phone_number} (user {user_key}) on worker {worker.id}")
+                            if not future.done():
+                                future.set_result(session_info)
+                            assigned = True
+                            break
+                        except Exception as e:
+                            logging.error(f"[QUEUE] Failed to start session for {phone_number} on worker {worker.id}: {e}")
+                            if not future.done():
+                                future.set_exception(e)
+                if not assigned:
                     # No slot, requeue and wait
-                    logging.info(f"[QUEUE] No slot for {phone_number} on worker {worker_id}, requeuing.")
+                    logging.info(f"[QUEUE] No slot for {phone_number} on any worker, requeuing.")
                     async with self.queue_lock:
                         self.session_start_queues[user_key].appendleft((phone_number, future))
                         if user_key not in self.queue_users:
@@ -462,6 +638,20 @@ class WAHASessionService:
             if session:
                 await self.db.delete(session)
                 await self.db.commit()
+            # --- Also delete from WAHASession table ---
+            from app.models.models import WAHASession
+            wahasession_query = select(WAHASession).where(WAHASession.phone_number == phone_number)
+            wahasession_result = await self.db.execute(wahasession_query)
+            wahasession = wahasession_result.scalar_one_or_none()
+            if wahasession:
+                await self.db.delete(wahasession)
+                await self.db.commit()
+            # --- Always trigger queue processor after session deletion ---
+            self.processing_queue = False
+            if self.queue_users:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._process_session_queue())
+                self.processing_queue = True
             if response is None:
                 raise HTTPException(status_code=404, detail="WAHA API did not respond or session does not exist.")
             if isinstance(response, dict) and response.get("error"):
@@ -482,14 +672,30 @@ class WAHASessionService:
             raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
 
     async def health_check(self) -> Dict[str, Any]:
-        """Check WAHA API health status"""
+        """Check WAHA API health status for all workers using only DB credentials."""
         try:
-            response = await self._make_waha_request("status")
-            return {
-                "status": "HEALTHY" if response.get("success") else "UNHEALTHY",
-                "message": "WAHA API is running" if response.get("success") else "WAHA API is not responding",
-                "details": response
-            }
+            from sqlalchemy import select
+            from app.models.models import Worker
+            workers_result = await self.db.execute(select(Worker))
+            workers = workers_result.scalars().all()
+            health_results = []
+            for worker in workers:
+                try:
+                    response = await self._make_waha_request("status", waha_url=worker.url, api_key=worker.api_key)
+                    health_results.append({
+                        "worker_id": worker.id,
+                        "status": "HEALTHY" if response.get("success") else "UNHEALTHY",
+                        "message": "WAHA API is running" if response.get("success") else "WAHA API is not responding",
+                        "details": response
+                    })
+                except Exception as e:
+                    health_results.append({
+                        "worker_id": worker.id,
+                        "status": "UNHEALTHY",
+                        "message": f"WAHA API health check failed: {str(e)}",
+                        "details": None
+                    })
+            return {"workers": health_results}
         except Exception as e:
             logging.error(f"WAHA API health check failed: {str(e)}")
             return {
@@ -560,9 +766,10 @@ class WAHASessionService:
             import os
             from app.models.models import WAHASession
             session_lifetime = int(os.getenv("SESSION_LIFETIME_SECONDS", 0))
+            error_lifetime = int(os.getenv("SESSION_ERROR_LIFETIME_SECONDS", 600))  # default 10 min
             now = datetime.utcnow()
             # Get all sessions that are in any active state
-            monitored_statuses = ["STARTING", "CONNECTED", "WORKING", "SCAN_QR_CODE"]
+            monitored_statuses = ["STARTING", "CONNECTED", "WORKING", "SCAN_QR_CODE" , "STOPPED"]
             query = select(Session).where(Session.status.in_(monitored_statuses))
             result = await self.db.execute(query)
             sessions = result.scalars().all()
@@ -581,6 +788,16 @@ class WAHASessionService:
                     afk_seconds = 12 * 24 * 60 * 60
                     if (now - session.last_active).total_seconds() > afk_seconds:
                         await self.keep_session_alive(session.phone_number)
+
+            # --- Remove error/failed sessions after timeout ---
+            error_statuses = ["FAILED", "ERROR"]
+            error_query = select(Session).where(Session.status.in_(error_statuses))
+            error_result = await self.db.execute(error_query)
+            error_sessions = error_result.scalars().all()
+            for session in error_sessions:
+                if (now - session.last_active).total_seconds() > error_lifetime:
+                    logging.info(f"Auto-deleting error session {session.phone_number} (error lifetime exceeded)")
+                    await self.delete_session(session.phone_number)
         except Exception as e:
             logging.error(f"Error monitoring sessions: {str(e)}")
             raise
@@ -694,6 +911,12 @@ class WAHASessionService:
                 wahasession.data = response
                 await self.db.commit()
                 logging.info(f"[stop_session] Set WAHASession status=STOPPED, last_active={wahasession.last_active} for {phone_number}")
+            # --- Trigger queue processor after a session is stopped (slot may open) ---
+            self.processing_queue = False
+            if self.queue_users:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._process_session_queue())
+                self.processing_queue = True
             return {
                 "phone_number": phone_number,
                 "status": "STOPPED",

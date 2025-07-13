@@ -21,6 +21,7 @@ class AdminService:
             )
             active_sessions = await self.db.execute(session_query)
             active_sessions = active_sessions.scalar() or 0
+
             
             # Get messages sent today
             today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -43,13 +44,19 @@ class AdminService:
             total_users = await self.db.execute(users_query)
             total_users = total_users.scalar() or 0
             
+            # Get total sessions count
+            total_sessions_query = select(func.count()).select_from(Session)
+            total_sessions = await self.db.execute(total_sessions_query)
+            total_sessions = total_sessions.scalar() or 0
+
             return {
                 "active_sessions": active_sessions,
                 "messages_sent_today": messages_sent_today,
                 "current_queue_size": queue_size,
                 "server_uptime": time.time() - SERVER_START_TIME,
                 "total_campaigns": total_campaigns,
-                "total_users": total_users
+                "total_users": total_users,
+                "total_sessions": total_sessions
             }
         except Exception as e:
             logging.error(f"Error getting system metrics: {str(e)}")
@@ -61,13 +68,13 @@ class AdminService:
             query = select(Session).where(func.upper(Session.status).in_(['CONNECTED', 'WORKING']))
             result = await self.db.execute(query)
             sessions = result.scalars().all()
-            
             return [
                 {
                     "phone_number": session.phone_number,
                     "status": session.status.upper() if session.status else None,
                     "last_active": session.last_active.isoformat(),
-                    "data": session.data
+                    "data": session.data,
+                    "requires_auth": (session.data.get("requires_auth") if session.data and isinstance(session.data, dict) and "requires_auth" in session.data else False)
                 }
                 for session in sessions
             ]

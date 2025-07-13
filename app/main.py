@@ -4,7 +4,6 @@ from app.routers import messaging, admin, sessions, webhook, delays, worker
 from app.services.session_monitor import SessionMonitor
 from app.services.message_queue import message_queue
 from app.db.database import engine, Base
-from app.config import settings
 from fastapi.staticfiles import StaticFiles
 import logging
 import os
@@ -17,8 +16,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Configure logging
 logging.basicConfig(
-    level=settings.log_level,
-    filename=settings.log_file,
+    level=os.getenv("LOG_LEVEL", "DEBUG"),
+    filename=os.getenv("LOG_FILE", "./logs/whatsapp_backend.log"),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 

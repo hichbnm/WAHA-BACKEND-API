@@ -14,4 +14,5 @@ httpx>=0.23.0
 asyncpg>=0.30.0
 apscheduler
 pytest  # for testing
+redis>=4.0.0 
 # requests  # uncomment if you use requests in scripts or future features

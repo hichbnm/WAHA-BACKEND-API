@@ -80,6 +80,7 @@ class SystemMetrics(BaseModel):
     server_uptime: float
     total_campaigns: int
     total_users: int
+    total_sessions: Optional[int] = None
 
 class UserStats(BaseModel):
     """User statistics for admin view"""
