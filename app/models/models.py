@@ -17,6 +17,7 @@ class Campaign(Base):
     sender_number = Column(String, index=True)
     template = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
     status = Column(String)
     total_messages = Column(Integer)
     sent_messages = Column(Integer, default=0)
@@ -36,8 +37,15 @@ class Message(Base):
     error = Column(String, nullable=True)
     sent_at = Column(DateTime, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
-    waha_message_id = Column(String, nullable=True, index=True)  # Add this line
-    
+    waha_message_id = Column(String, nullable=True, index=True)
+
+    __table_args__ = (
+        # Prevent duplicate messages for the same campaign and recipient
+        {'sqlite_autoincrement': True},
+        # For PostgreSQL, add a unique constraint
+        # UniqueConstraint('campaign_id', 'recipient', name='uq_campaign_recipient')
+    )
+
     campaign = relationship("Campaign", back_populates="messages")
 
 class Session(Base):
@@ -73,3 +81,11 @@ class WAHASession(Base):
     data = Column(JSON)
 
     worker = relationship("Worker", back_populates="sessions")
+
+class UserDelay(Base):
+    __tablename__ = "user_delays"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sender_number = Column(String, unique=True, index=True, nullable=False)
+    message_delay = Column(Integer, nullable=True)
+    campaign_delay = Column(Integer, nullable=True)

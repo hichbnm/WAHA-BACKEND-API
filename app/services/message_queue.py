@@ -10,7 +10,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import Campaign, Message
 from app.services.messaging import MessagingService
-from app.routers.delays import _user_delays, _user_delays_lock
+from app.models.models import UserDelay
+from app.db.database import async_session
+from sqlalchemy.future import select
 
 # Utility for phone number normalization (import from delays or define here)
 def normalize_number(number: str) -> str:
@@ -36,25 +38,18 @@ class MessageQueue:
             # Remove static campaign_delay, always read from env
             cls._instance.last_campaign_time: Dict[str, datetime] = {}  # Last campaign completion time per sender
             cls._instance.active_senders: Set[str] = set()  # Senders currently being processed
+            cls._instance.last_sender: Optional[str] = None  # Track last sender for sender switch delay
         return cls._instance
 
     async def start_processing(self, db_pool, num_workers: int = None):
-        """Start multiple workers to process the message queue in parallel."""
+        """Start multiple workers to process the message queue in parallel (DB-driven)."""
         if not self.processing:
             self.processing = True
             self.db_pool = db_pool
-            # --- Add campaigns with pending messages to the queue on startup ---
-            async with AsyncSession(db_pool) as db:
-                query = select(Message.campaign_id, Campaign.sender_number).join(Campaign).where(Message.status == "PENDING")
-                result = await db.execute(query)
-                campaigns = set(result.fetchall())
-                for campaign_id, sender_number in campaigns:
-                    await self.add_campaign(campaign_id, sender_number)
-            # --- End patch ---
             if num_workers is not None:
                 self.num_workers = num_workers
             self.worker_tasks = [asyncio.create_task(self._process_queue(db_pool)) for _ in range(self.num_workers)]
-            logging.info(f"Message queue processor started with {self.num_workers} workers")
+            logging.info(f"Message queue processor started with {self.num_workers} workers (DB-driven)")
 
     async def stop_processing(self):
         """Stop all worker tasks."""
@@ -69,111 +64,143 @@ class MessageQueue:
             self.worker_tasks = []
             logging.info("Message queue processor stopped")
 
-    async def add_campaign(self, campaign_id: int, sender_number: str = None):
-        if sender_number:
-            sender_number = normalize_number(sender_number)
-        """Add a campaign to the queue, storing sender_number for fast per-user stats."""
-        async with self._lock:
-            if campaign_id not in self.active_campaigns:
-                if sender_number is None:
-                    # Fallback: fetch sender_number from DB (should not happen in optimized flow)
-                    from app.models.models import Campaign
-                    import asyncio
-                    async with AsyncSession(self.db_pool) as db:
-                        query = select(Campaign).where(Campaign.id == campaign_id)
-                        result = await db.execute(query)
-                        campaign = result.scalar_one_or_none()
-                        sender_number = normalize_number(campaign.sender_number) if campaign else None
-                self.queue.append((campaign_id, sender_number))
-                logging.info(f"Campaign {campaign_id} (sender {sender_number}) added to queue")
+    # No longer needed: campaigns are selected directly from DB
 
     async def get_size(self) -> int:
-        """Get current queue size"""
-        async with self._lock:
-            return len(self.queue)
+        """Get number of campaigns with pending messages in DB."""
+        async with AsyncSession(self.db_pool) as db:
+            query = select(Message.campaign_id).where(Message.status == "PENDING")
+            result = await db.execute(query)
+            campaigns = set(row[0] for row in result.fetchall())
+            return len(campaigns)
 
     async def get_size_by_sender(self, sender_number: str) -> int:
         sender_number = normalize_number(sender_number)
-        """Get the number of campaigns in the queue for a specific sender_number."""
-        async with self._lock:
-            return sum(1 for _, s in self.queue if s == sender_number)
+        async with AsyncSession(self.db_pool) as db:
+            from app.models.models import Campaign, Message
+            query = select(Message.campaign_id).join(Campaign).where(
+                Message.status == "PENDING",
+                Campaign.sender_number == sender_number
+            )
+            result = await db.execute(query)
+            campaigns = set(row[0] for row in result.fetchall())
+            return len(campaigns)
 
     async def _process_queue(self, db_pool):
         import threading
         import asyncio
+        from sqlalchemy import text
         logging.info(f"WORKER_CONTEXT: thread={threading.current_thread().name}, event_loop={asyncio.get_event_loop()}")
-        self.db_pool = db_pool  # Store for add_campaign fallback
-        """Process messages in the queue"""
+        self.db_pool = db_pool
+        from app.models.models import Campaign, Message
         while self.processing:
             try:
-                campaign_id = None
-                sender_number = None
-                async with self._lock:
-                    # --- PATCH: Find next campaign that respects campaign delay and is not already active ---
-                    for idx, (cid, s_number) in enumerate(self.queue):
-                        # Only process if sender is not already active
-                        if s_number in self.active_senders:
-                            continue
-                        # Always read campaign delay from env
-                        campaign_delay = int(os.getenv('CAMPAIGN_DELAY', '10'))
-                        with _user_delays_lock:
-                            user_delay = _user_delays.get(s_number)
-                        if user_delay and "CAMPAIGN_DELAY" in user_delay:
-                            campaign_delay = int(user_delay["CAMPAIGN_DELAY"])
-                        last_campaign_time = self.last_campaign_time.get(s_number)
+                # --- DB-driven campaign selection ---
+                async with AsyncSession(db_pool, expire_on_commit=False) as db:
+                    # Find next campaign with pending messages, not locked, and respecting campaign delay
+                    # Use FOR UPDATE SKIP LOCKED for distributed locking
+                    # Get per-sender last completed campaign time from campaign table
+                    # Only select campaigns with status 'PENDING' or 'IN_PROGRESS'
+                    # Enforce campaign delay by checking last completed campaign for sender
+                    # This query assumes campaigns table has sender_number and status fields
+                    # You may need to adjust field names if different
+                    # Get all eligible campaigns
+                    eligible_campaign = None
+                    # Raw SQL for SKIP LOCKED (SQLAlchemy 1.4+ supports with_execution_options)
+                    query = (
+                        select(Campaign)
+                        .where(Campaign.status == "PENDING")
+                        .order_by(Campaign.created_at)
+                        .with_for_update(skip_locked=True)
+                    )
+                    result = await db.execute(query)
+                    campaigns = result.scalars().all()
+                    eligible_campaign = None
+                    for campaign in campaigns:
                         now = datetime.utcnow()
-                        if last_campaign_time:
-                            elapsed = (now - last_campaign_time).total_seconds()
+                        # Check if campaign has pending messages
+                        msg_query = select(Message).where(
+                            Message.campaign_id == campaign.id,
+                            Message.status == "PENDING"
+                        )
+                        msg_result = await db.execute(msg_query)
+                        pending_msgs = msg_result.scalars().all()
+                        if not pending_msgs:
+                            continue
+                        # ATOMIC: Lock all campaigns for this sender (FOR UPDATE)
+                        sender_lock_query = (
+                            select(Campaign)
+                            .where(Campaign.sender_number == campaign.sender_number)
+                            .with_for_update()
+                        )
+                        await db.execute(sender_lock_query)
+                        # Check if this sender has any campaign IN_PROGRESS
+                        in_progress_query = select(Campaign).where(
+                            Campaign.sender_number == campaign.sender_number,
+                            Campaign.status == "IN_PROGRESS"
+                        )
+                        in_progress_result = await db.execute(in_progress_query)
+                        in_progress_campaign = in_progress_result.scalar_one_or_none()
+                        if in_progress_campaign:
+                            continue  # Wait for previous campaign to complete
+                        # Enforce campaign delay (fetch from DB)
+                        from app.services.delay_config import get_delay_config
+                        config = await get_delay_config(db)
+                        campaign_delay = config.campaign_delay
+                        # Fetch per-user campaign delay from DB
+                        result = await db.execute(select(UserDelay).where(UserDelay.sender_number == campaign.sender_number))
+                        user_delay = result.scalar_one_or_none()
+                        if user_delay and user_delay.campaign_delay is not None:
+                            campaign_delay = int(user_delay.campaign_delay)
+                        # Find last completed campaign for this sender (from DB)
+                        last_completed_query = select(Campaign.completed_at).where(
+                            Campaign.sender_number == campaign.sender_number,
+                            Campaign.status.in_(["COMPLETED", "COMPLETED_WITH_ERRORS"]),
+                            Campaign.completed_at.isnot(None)
+                        ).order_by(Campaign.completed_at.desc())
+                        last_completed_result = await db.execute(last_completed_query)
+                        last_completed_at = last_completed_result.scalar()
+                        logging.info(f"[DELAY CHECK] Sender: {campaign.sender_number}, Campaign: {campaign.id}, Now: {now}, Last completed: {last_completed_at}, Delay: {campaign_delay}")
+                        if last_completed_at:
+                            elapsed = (now - last_completed_at).total_seconds()
+                            logging.info(f"[DELAY CHECK] Elapsed since last completed: {elapsed} seconds")
                             if elapsed < campaign_delay:
-                                continue  # Not ready yet
-                        # Found a campaign that can be processed
-                        campaign_id, sender_number = cid, s_number
-                        self.queue.remove((cid, s_number))
-                        self.active_campaigns.add(campaign_id)
-                        self.active_senders.add(sender_number)
-                        break
-
-                if campaign_id:
-                    try:
-                        # Fetch campaign details once
-                        async with AsyncSession(db_pool, expire_on_commit=False) as db:
-                            query = select(Campaign).where(Campaign.id == campaign_id)
-                            result = await db.execute(query)
-                            campaign = result.scalar_one_or_none()
-                            if not campaign:
-                                logging.error(f"Campaign {campaign_id} not found")
+                                logging.info(f"[DELAY ENFORCED] Sender: {campaign.sender_number}, Campaign: {campaign.id}, Waiting for {campaign_delay - elapsed} seconds")
                                 continue
-                            # Get pending message IDs
-                            query = select(Message.id).where(
-                                Message.campaign_id == campaign_id,
-                                Message.status == "PENDING"
-                            )
-                            result = await db.execute(query)
-                            message_ids = [row[0] for row in result.fetchall()]
-
+                        # Immediately set campaign status to IN_PROGRESS and commit
+                        campaign.status = "IN_PROGRESS"
+                        await db.commit()
+                        logging.info(f"[CAMPAIGN START] Sender: {campaign.sender_number}, Campaign: {campaign.id}, Started at: {datetime.utcnow()}")
+                        eligible_campaign = campaign
+                        break
+                if eligible_campaign:
+                    campaign_id = eligible_campaign.id
+                    sender_number = eligible_campaign.sender_number
+                    try:
+                        # Mark campaign as IN_PROGRESS
+                        eligible_campaign.status = "IN_PROGRESS"
+                        await db.commit()
+                        # Get pending message IDs
+                        msg_query = select(Message.id).where(
+                            Message.campaign_id == campaign_id,
+                            Message.status == "PENDING"
+                        )
+                        msg_result = await db.execute(msg_query)
+                        message_ids = [row[0] for row in msg_result.fetchall()]
                         messaging_service = MessagingService()
                         for message_id in message_ids:
                             try:
-                                # Use a new session for each message
                                 async with AsyncSession(db_pool, expire_on_commit=False) as db_msg:
-                                    # Fetch message and campaign fresh in this session
                                     query = select(Message).where(Message.id == message_id)
                                     result = await db_msg.execute(query)
                                     message = result.scalar_one()
                                     query = select(Campaign).where(Campaign.id == campaign_id)
                                     result = await db_msg.execute(query)
                                     campaign = result.scalar_one()
-
-                                    # Check and apply rate limiting
-                                    await self._apply_rate_limiting(campaign.sender_number)
-
-                                    # Replace variables in template if any
+                                    await self._apply_rate_limiting(campaign.sender_number, db_msg)
                                     final_message = campaign.template
                                     if campaign.variables:
-                                        # TODO: Implement variable replacement logic
-                                        pass
-
-                                    # Send message
+                                        pass  # TODO: Implement variable replacement logic
                                     messaging_service = MessagingService(db_msg)
                                     result = await messaging_service.send_message(
                                         campaign.sender_number,
@@ -181,11 +208,9 @@ class MessageQueue:
                                         final_message,
                                         campaign.media_url
                                     )
-                                    # Update message status and WAHA message ID
                                     message.status = "SENT"
                                     message.sent_at = datetime.utcnow()
-                                    message.delivered_at = message.sent_at  # Always set delivered_at to sent_at
-                                    # Only save a string to waha_message_id
+                                    message.delivered_at = message.sent_at
                                     waha_id = result["details"].get("waha_message_id")
                                     if isinstance(waha_id, dict):
                                         message.waha_message_id = waha_id.get("_serialized") or waha_id.get("id")
@@ -193,11 +218,6 @@ class MessageQueue:
                                         message.waha_message_id = waha_id
                                     campaign.sent_messages += 1
                                     await db_msg.commit()
-
-                                    # Update last send time
-                                    self.last_send_time[campaign.sender_number] = datetime.utcnow()
-
-                                    # Update session last_active to keep session alive during broadcast
                                     from app.models.models import Session
                                     query = select(Session).where(Session.phone_number == campaign.sender_number)
                                     result = await db_msg.execute(query)
@@ -205,10 +225,12 @@ class MessageQueue:
                                     if session:
                                         session.last_active = datetime.utcnow()
                                         await db_msg.commit()
-
+                                    # Update last_send_time for per-message delay
+                                    self.last_send_time[campaign.sender_number] = datetime.utcnow()
+                                    # Update last_sender for sender switch delay
+                                    self.last_sender = campaign.sender_number
                             except Exception as e:
                                 logging.error(f"Error sending message {message_id}: {str(e)}")
-                                # Use a new session for error update
                                 async with AsyncSession(db_pool, expire_on_commit=False) as db_err:
                                     query = select(Message).where(Message.id == message_id)
                                     result = await db_err.execute(query)
@@ -220,63 +242,56 @@ class MessageQueue:
                                     message.error = str(e)
                                     campaign.failed_messages += 1
                                     await db_err.commit()
-
-                        # After all messages, update campaign status
+                        # After all messages, update campaign status and completed_at
                         async with AsyncSession(db_pool, expire_on_commit=False) as db_final:
                             query = select(Campaign).where(Campaign.id == campaign_id)
                             result = await db_final.execute(query)
                             campaign = result.scalar_one()
                             campaign.status = "COMPLETED"
+                            campaign.completed_at = datetime.utcnow()
+                            logging.info(f"[CAMPAIGN COMPLETE] Sender: {campaign.sender_number}, Campaign: {campaign.id}, Completed at: {campaign.completed_at}")
                             if campaign.failed_messages > 0:
                                 campaign.status = "COMPLETED_WITH_ERRORS"
                             await db_final.commit()
-                        # --- PATCH: Update last campaign time for sender ---
-                        self.last_campaign_time[sender_number] = datetime.utcnow()
-                        # --- PATCH: Enforce campaign delay strictly after completion ---
-                        campaign_delay = int(os.getenv('CAMPAIGN_DELAY', '10'))
-                        with _user_delays_lock:
-                            user_delay = _user_delays.get(sender_number)
-                        if user_delay and "CAMPAIGN_DELAY" in user_delay:
-                            campaign_delay = int(user_delay["CAMPAIGN_DELAY"])
-                        await asyncio.sleep(campaign_delay)
-                        # --- PATCH: Mark sender as inactive so next campaign can start ---
-                        async with self._lock:
-                            self.active_senders.discard(sender_number)
-
+                        # Ensure DB commit is visible before next campaign selection
+                        import asyncio
+                        await asyncio.sleep(0.2)
+                        # Log all campaigns for this sender to verify DB state
+                        async with AsyncSession(db_pool, expire_on_commit=False) as db_debug:
+                            from app.models.models import Campaign
+                            debug_query = select(Campaign.id, Campaign.status, Campaign.completed_at).where(Campaign.sender_number == campaign.sender_number)
+                            debug_result = await db_debug.execute(debug_query)
+                            debug_campaigns = debug_result.fetchall()
+                            logging.info(f"[DEBUG] Campaigns for sender {campaign.sender_number}: " + ", ".join([f'id={row[0]}, status={row[1]}, completed_at={row[2]}' for row in debug_campaigns]))
                     except Exception as e:
                         logging.error(f"Error processing campaign {campaign_id}: {str(e)}")
-                    finally:
-                        async with self._lock:
-                            self.active_campaigns.remove(campaign_id)
-                
-                # Small delay to prevent CPU overuse when queue is empty
+                # Small delay to prevent CPU overuse when no eligible campaign
                 await asyncio.sleep(0.1)
-
             except Exception as e:
                 logging.error(f"Error in message queue processor: {str(e)}")
-                await asyncio.sleep(1)  # Longer delay on error
+                await asyncio.sleep(1)
 
-    async def _apply_rate_limiting(self, sender_number: str):
+    async def _apply_rate_limiting(self, sender_number: str, db_session: AsyncSession):
         sender_number = normalize_number(sender_number)
         """Apply rate limiting rules"""
-        import os
+        from app.services.delay_config import get_delay_config
+        import asyncio
         now = datetime.utcnow()
-        # --- PATCH: Use per-user delay if set, else fallback to global ---
-        with _user_delays_lock:
-            user_delay = _user_delays.get(sender_number)
-        if user_delay:
-            message_delay = int(user_delay.get('MESSAGE_DELAY', os.environ.get('MESSAGE_DELAY', '2')))
-            sender_switch_delay = int(user_delay.get('SENDER_SWITCH_DELAY', os.environ.get('SENDER_SWITCH_DELAY', '5')))
+        # Fetch global delays from DB using provided session
+        config = await get_delay_config(db_session)
+        # Fetch per-user message delay from DB
+        result = await db_session.execute(select(UserDelay).where(UserDelay.sender_number == sender_number))
+        user_delay = result.scalar_one_or_none()
+        if user_delay and user_delay.message_delay is not None:
+            message_delay = int(user_delay.message_delay)
         else:
-            message_delay = int(os.environ.get('MESSAGE_DELAY', '2'))
-            sender_switch_delay = int(os.environ.get('SENDER_SWITCH_DELAY', '5'))
-        # Check if we need to apply sender switch delay
-        last_sender = None
-        if self.last_send_time:
-            last_sender = max(self.last_send_time.items(), key=lambda x: x[1])[0]
-        if last_sender and last_sender != sender_number:
+            message_delay = config.message_delay
+        sender_switch_delay = config.sender_switch_delay
+
+        # Apply sender switch delay if switching senders
+        if self.last_sender is not None and self.last_sender != sender_number:
             await asyncio.sleep(sender_switch_delay)
-            await asyncio.sleep(sender_switch_delay)
+
         # Check if we need to apply message delay
         if sender_number in self.last_send_time:
             last_time = self.last_send_time[sender_number]

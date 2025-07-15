@@ -739,21 +739,38 @@ class WAHASessionService:
             raise ValueError(f"Failed to get account info: {str(e)}")
 
     async def list_sessions(self):
-        """List all WAHA sessions across all workers"""
+        """List all WAHA sessions across all workers, including STOPPED from DB"""
         try:
             from sqlalchemy import select
-            from app.models.models import Worker
+            from app.models.models import Worker, Session
             workers_result = await self.db.execute(select(Worker))
             workers = workers_result.scalars().all()
             all_sessions = []
+            seen_numbers = set()
+            # Gather sessions from WAHA API
             for worker in workers:
                 try:
                     sessions = await self._make_waha_request("sessions", waha_url=worker.url, api_key=worker.api_key)
                     if isinstance(sessions, dict):
                         sessions = list(sessions.values())
-                    all_sessions.extend(sessions)
+                    for s in sessions:
+                        phone = s.get("name", "")
+                        seen_numbers.add(phone)
+                        all_sessions.append(s)
                 except Exception as e:
                     logging.error(f"Error listing sessions from worker {worker.id}: {e}")
+            # Add DB sessions not present in WAHA API (e.g., STOPPED)
+            db_sessions_result = await self.db.execute(select(Session))
+            db_sessions = db_sessions_result.scalars().all()
+            for db_s in db_sessions:
+                if db_s.phone_number not in seen_numbers:
+                    # Build a dict similar to WAHA API response
+                    all_sessions.append({
+                        "name": db_s.phone_number,
+                        "status": db_s.status,
+                        "last_active": db_s.last_active,
+                        "data": db_s.data or {},
+                    })
             return all_sessions
         except Exception as e:
             logging.error(f"Error listing sessions: {str(e)}")

@@ -1,1 +1,13 @@
-ALTER TABLE messages ADD COLUMN waha_message_id VARCHAR;
+ALTER TABLE campaigns ADD COLUMN completed_at TIMESTAMP NULL;
+1/ SELECT campaign_id, recipient, COUNT(*) 
+FROM messages 
+GROUP BY campaign_id, recipient 
+HAVING COUNT(*) > 1;
+
+2/ DELETE FROM messages
+WHERE id NOT IN (
+    SELECT MIN(id)
+    FROM messages
+    GROUP BY campaign_id, recipient
+);
+3/ ALTER TABLE messages ADD CONSTRAINT uq_campaign_recipient UNIQUE (campaign_id, recipient);

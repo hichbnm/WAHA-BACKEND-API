@@ -35,7 +35,7 @@ class CampaignService:
         db_campaign = models.Campaign(
             sender_number=campaign.sender_number,
             template=campaign.template,
-            status="QUEUED",
+            status="PENDING",
             total_messages=len(campaign.recipients),
             sent_messages=0,
             failed_messages=0,
@@ -44,8 +44,8 @@ class CampaignService:
         )
         self.db.add(db_campaign)
         await self.db.flush()  # Get campaign ID
-        
-        # Create message records
+
+        # Create message records (allow duplicates)
         for recipient in campaign.recipients:
             message = models.Message(
                 campaign_id=db_campaign.id,
@@ -53,15 +53,14 @@ class CampaignService:
                 status="PENDING"
             )
             self.db.add(message)
-        
+
         await self.db.commit()
-        
-        # Queue messages for sending using the singleton instance
-        await message_queue.add_campaign(db_campaign.id)
-        
+
+        # No need to queue campaign; DB-driven processor will pick it up
+
         return schemas.CampaignResponse(
             id=db_campaign.id,
-            status="QUEUED",
+            status="PENDING",
             total_messages=len(campaign.recipients),
             created_at=db_campaign.created_at
         )
