@@ -1,11 +1,16 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
+from app.db.base import Base
 import os
 from dotenv import load_dotenv
 import logging
+load_dotenv()  # <-- Move this to the top, before anything else
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./whatsapp_campaigns.db")
+
 
 load_dotenv()
+print(f"[DEBUG] DATABASE_URL: {DATABASE_URL}")
 
 # Get database configuration from environment
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./whatsapp_campaigns.db")
@@ -33,7 +38,7 @@ if DATABASE_URL.startswith("sqlite"):
 try:
     engine = create_async_engine(DATABASE_URL, **engine_config)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    Base = declarative_base()
+    # Base is imported from app.db.base
 except Exception as e:
     logging.error(f"Failed to create database engine: {str(e)}")
     raise

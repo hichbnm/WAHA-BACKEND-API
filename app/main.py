@@ -4,6 +4,8 @@ from app.routers import messaging, admin, sessions, webhook, delays, worker
 from app.services.session_monitor import SessionMonitor
 from app.services.message_queue import message_queue
 from app.db.database import engine, Base
+from app.models.message_queue import MessageQueue
+from app.models.delays import DelayConfig
 from fastapi.staticfiles import StaticFiles
 import logging
 import os
@@ -80,13 +82,21 @@ async def init_services():
     # Initialize database
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Reset all IN_PROGRESS campaigns and messages to PENDING on startup
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import update
+    async with AsyncSession(engine) as db:
+        from app.models.models import Campaign, Message
+        await db.execute(update(Campaign).where(Campaign.status == "IN_PROGRESS").values(status="PENDING"))
+        await db.execute(update(Message).where(Message.status == "IN_PROGRESS").values(status="PENDING"))
+        await db.commit()
     
     # Start session monitor
     session_monitor = SessionMonitor(engine)
     await session_monitor.start()
     
-    # Start message queue processor with 4 workers
-    await message_queue.start_processing(engine, num_workers=4)
+    # Start message queue processor (worker count from env)
+    await message_queue.start_processing(engine)
     
     logging.info("Database initialized and background services started")
 

@@ -54,9 +54,16 @@ class CampaignService:
             )
             self.db.add(message)
 
+
         await self.db.commit()
 
-        # No need to queue campaign; DB-driven processor will pick it up
+        # Enqueue campaign for background processing via Celery
+        try:
+            from tasks.campaign_tasks import process_campaign_task
+            process_campaign_task.delay(db_campaign.id)
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to enqueue campaign {db_campaign.id} to Celery: {e}")
 
         return schemas.CampaignResponse(
             id=db_campaign.id,

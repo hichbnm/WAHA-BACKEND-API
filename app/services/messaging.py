@@ -39,27 +39,55 @@ class MessagingService:
             raise ValueError("Invalid response from WAHA API")
 
     async def send_message(self, sender_number: str, recipient: str, message: str, media_url: Optional[str] = None) -> Dict[str, Any]:
-        """Send a message with optional media using the correct WAHA worker for the sender_number"""
+        """Send a message with optional media. If both message and media_url are provided, send as a single media message with caption."""
         try:
-            # Remove '+' if present for WAHA chatId
             recipient_id = recipient.lstrip('+') + '@c.us'
-            # Add session field to payload for WAHA compatibility
-            payload = {
-                "session": sender_number,  # or "sessionId": sender_number if WAHA expects that
-                "chatId": recipient_id,
-                "text": message
-            }
-            logging.info(f"Sending WAHA sendText payload: {payload}")
-
-            # --- Per-worker sharding: get correct worker for sender_number ---
             if not self.db:
                 raise ValueError("MessagingService requires a DB session for per-worker routing.")
             waha_service = WAHASessionService(self.db)
             waha_url, api_key = await waha_service._get_worker_for_session(sender_number)
 
             waha_message_id = None
-            # Send text message
-            if message:
+            text_sent = False
+            media_sent = False
+
+            if media_url:
+                # Use /api/sendImage endpoint with WAHA's required schema
+                # Guess mimetype from URL extension (default to image/jpeg)
+                import mimetypes, os
+                mimetype, _ = mimetypes.guess_type(media_url)
+                if not mimetype:
+                    mimetype = "image/jpeg"
+                filename = os.path.basename(media_url)
+                image_payload = {
+                    "chatId": recipient_id,
+                    "file": {
+                        "mimetype": mimetype,
+                        "filename": filename,
+                        "url": media_url
+                    },
+                    "caption": message or "",
+                    "session": sender_number
+                }
+                media_response = await self._make_waha_request(
+                    "sendImage",
+                    data=image_payload,
+                    waha_url=waha_url,
+                    api_key=api_key
+                )
+                if media_response.get("error"):
+                    raise ValueError(f"Failed to send image: {media_response['error']}")
+                waha_message_id = media_response.get("id")
+                media_sent = True
+                text_sent = bool(message)
+            elif message:
+                # Only text
+                payload = {
+                    "session": sender_number,
+                    "chatId": recipient_id,
+                    "text": message
+                }
+                logging.info(f"Sending WAHA sendText payload: {payload}")
                 text_response = await self._make_waha_request(
                     "sendText",
                     data=payload,
@@ -69,32 +97,16 @@ class MessagingService:
                 if text_response.get("error"):
                     raise ValueError(f"Failed to send text message: {text_response['error']}")
                 waha_message_id = text_response.get("id")
+                text_sent = True
 
-            # Send media if provided
-            if media_url:
-                media_response = await self._make_waha_request(
-                    "sendMedia",
-                    data={
-                        "chatId": recipient_id,
-                        "mediaUrl": media_url
-                    },
-                    waha_url=waha_url,
-                    api_key=api_key
-                )
-                if media_response.get("error"):
-                    raise ValueError(f"Failed to send media: {media_response['error']}")
-                if not waha_message_id:
-                    waha_message_id = media_response.get("id")
-
-            # Update last_active after successful send
             await update_last_active(self.db, sender_number)
 
             return {
                 "status": "success",
                 "message": "Message sent successfully",
                 "details": {
-                    "text_sent": bool(message),
-                    "media_sent": bool(media_url),
+                    "text_sent": text_sent,
+                    "media_sent": media_sent,
                     "waha_message_id": waha_message_id
                 }
             }

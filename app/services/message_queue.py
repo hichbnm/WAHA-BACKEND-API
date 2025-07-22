@@ -19,6 +19,103 @@ def normalize_number(number: str) -> str:
     return number.lstrip('+').strip() if number else number
 
 class MessageQueue:
+    async def process_campaign_by_id(self, db_pool, campaign_id):
+        """Process a single campaign by its ID (for Celery task)."""
+        from app.models.models import Campaign, Message
+        from app.services.messaging import MessagingService
+        from sqlalchemy.ext.asyncio import AsyncSession
+        from sqlalchemy import select, update
+        import logging
+        from datetime import datetime
+        try:
+            async with AsyncSession(db_pool, expire_on_commit=False) as db:
+                # Fetch the campaign
+                query = select(Campaign).where(Campaign.id == campaign_id)
+                result = await db.execute(query)
+                campaign = result.scalar_one_or_none()
+                if not campaign:
+                    logging.error(f"[CELERY] Campaign {campaign_id} not found.")
+                    return
+                # Check if any other campaign for this sender is IN_PROGRESS
+                in_progress_query = select(Campaign).where(
+                    Campaign.sender_number == campaign.sender_number,
+                    Campaign.status == "IN_PROGRESS",
+                    Campaign.id != campaign_id
+                )
+                in_progress_result = await db.execute(in_progress_query)
+                in_progress_campaign = in_progress_result.scalar_one_or_none()
+                if in_progress_campaign:
+                    logging.warning(f"[CELERY] Skipping campaign {campaign_id}: another campaign for sender {campaign.sender_number} is already IN_PROGRESS.")
+                    return
+                # ATOMIC: Try to claim the campaign by setting status to IN_PROGRESS only if it is PENDING
+                update_stmt = update(Campaign).where(
+                    Campaign.id == campaign_id,
+                    Campaign.status == "PENDING"
+                ).values(status="IN_PROGRESS")
+                result = await db.execute(update_stmt)
+                await db.commit()
+                if result.rowcount == 0:
+                    # Already claimed or processed by another worker
+                    logging.warning(f"[CELERY] Skipping campaign {campaign_id}: already claimed or not pending.")
+                    return
+                # Now fetch the campaign (should be IN_PROGRESS)
+                query = select(Campaign).where(Campaign.id == campaign_id)
+                result = await db.execute(query)
+                campaign = result.scalar_one_or_none()
+                if not campaign:
+                    logging.error(f"[CELERY] Campaign {campaign_id} not found after claim.")
+                    return
+                # Get pending messages
+                msg_query = select(Message.id).where(
+                    Message.campaign_id == campaign_id,
+                    Message.status == "PENDING"
+                )
+                msg_result = await db.execute(msg_query)
+                message_ids = [row[0] for row in msg_result.fetchall()]
+                messaging_service = MessagingService(db)
+                for message_id in message_ids:
+                    try:
+                        query = select(Message).where(Message.id == message_id)
+                        result = await db.execute(query)
+                        message = result.scalar_one()
+                        await self._apply_rate_limiting(campaign.sender_number, db)
+                        final_message = campaign.template
+                        if campaign.variables:
+                            pass  # TODO: Implement variable replacement logic
+                        result = await messaging_service.send_message(
+                            campaign.sender_number,
+                            message.recipient,
+                            final_message,
+                            campaign.media_url
+                        )
+                        message.status = "SENT"
+                        message.sent_at = datetime.utcnow()
+                        message.delivered_at = message.sent_at
+                        waha_id = result["details"].get("waha_message_id")
+                        if isinstance(waha_id, dict):
+                            message.waha_message_id = waha_id.get("_serialized") or waha_id.get("id")
+                        else:
+                            message.waha_message_id = waha_id
+                        campaign.sent_messages += 1
+                        await db.commit()
+                    except Exception as e:
+                        logging.error(f"[CELERY] Error sending message {message_id}: {str(e)}")
+                        query = select(Message).where(Message.id == message_id)
+                        result = await db.execute(query)
+                        message = result.scalar_one()
+                        message.status = "FAILED"
+                        message.error = str(e)
+                        campaign.failed_messages += 1
+                        await db.commit()
+                # After all messages, update campaign status and completed_at
+                campaign.status = "COMPLETED"
+                campaign.completed_at = datetime.utcnow()
+                if campaign.failed_messages > 0:
+                    campaign.status = "COMPLETED_WITH_ERRORS"
+                await db.commit()
+                logging.info(f"[CELERY] Campaign {campaign.sender_number} {campaign.id} completed.")
+        except Exception as e:
+            logging.error(f"[CELERY] Error processing campaign {campaign_id}: {str(e)}")
     _instance = None
     _lock = asyncio.Lock()
     
@@ -34,11 +131,11 @@ class MessageQueue:
             cls._instance.processing = False
             cls._instance.processing_task = None
             cls._instance.worker_tasks = []  # Store worker tasks
-            cls._instance.num_workers = 4  # Default to 4 workers
+            cls._instance.num_workers = int(os.getenv('MESSAGE_QUEUE_WORKERS', '4'))  # Configurable via env
             # Remove static campaign_delay, always read from env
             cls._instance.last_campaign_time: Dict[str, datetime] = {}  # Last campaign completion time per sender
             cls._instance.active_senders: Set[str] = set()  # Senders currently being processed
-            cls._instance.last_sender: Optional[str] = None  # Track last sender for sender switch delay
+            # Remove global sender switch lock; use per-worker last_sender
         return cls._instance
 
     async def start_processing(self, db_pool, num_workers: int = None):
@@ -93,6 +190,8 @@ class MessageQueue:
         logging.info(f"WORKER_CONTEXT: thread={threading.current_thread().name}, event_loop={asyncio.get_event_loop()}")
         self.db_pool = db_pool
         from app.models.models import Campaign, Message
+        # Each worker tracks its own last_sender
+        last_sender = None
         while self.processing:
             try:
                 # --- DB-driven campaign selection ---
@@ -118,6 +217,12 @@ class MessageQueue:
                     eligible_campaign = None
                     for campaign in campaigns:
                         now = datetime.utcnow()
+                        # Sender switch delay: only if switching sender at campaign start
+                        if last_sender is not None and last_sender != campaign.sender_number:
+                            from app.services.delay_config import get_delay_config
+                            config = await get_delay_config(db)
+                            sender_switch_delay = config.sender_switch_delay
+                            await asyncio.sleep(sender_switch_delay)
                         # Check if campaign has pending messages
                         msg_query = select(Message).where(
                             Message.campaign_id == campaign.id,
@@ -172,6 +277,7 @@ class MessageQueue:
                         await db.commit()
                         logging.info(f"[CAMPAIGN START] Sender: {campaign.sender_number}, Campaign: {campaign.id}, Started at: {datetime.utcnow()}")
                         eligible_campaign = campaign
+                        last_sender = campaign.sender_number
                         break
                 if eligible_campaign:
                     campaign_id = eligible_campaign.id
@@ -286,11 +392,6 @@ class MessageQueue:
             message_delay = int(user_delay.message_delay)
         else:
             message_delay = config.message_delay
-        sender_switch_delay = config.sender_switch_delay
-
-        # Apply sender switch delay if switching senders
-        if self.last_sender is not None and self.last_sender != sender_number:
-            await asyncio.sleep(sender_switch_delay)
 
         # Check if we need to apply message delay
         if sender_number in self.last_send_time:
