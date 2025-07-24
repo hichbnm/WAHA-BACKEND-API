@@ -54,6 +54,7 @@ class Session(Base):
     phone_number = Column(String, primary_key=True, index=True)
     status = Column(String)
     last_active = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, server_default="now()", onupdate=None)
     data = Column(JSON)
 
 class Worker(Base):

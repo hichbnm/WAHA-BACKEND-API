@@ -35,8 +35,20 @@ class MessageQueue:
                 campaign = result.scalar_one_or_none()
                 if not campaign:
                     logging.error(f"[CELERY] Campaign {campaign_id} not found.")
+                    # Log all campaigns for this sender
+                    debug_query = select(Campaign.id, Campaign.status, Campaign.completed_at).where(Campaign.sender_number == campaign.sender_number)
+                    debug_result = await db.execute(debug_query)
+                    debug_campaigns = debug_result.fetchall()
+                    logging.info(f"[DEBUG] All campaigns for sender {campaign.sender_number}: " + ", ".join([f'id={row[0]}, status={row[1]}, completed_at={row[2]}' for row in debug_campaigns]))
                     return
-                # Check if any other campaign for this sender is IN_PROGRESS
+                # Lock all campaigns for this sender and perform atomic check and update
+                sender_lock_query = (
+                    select(Campaign)
+                    .where(Campaign.sender_number == campaign.sender_number)
+                    .with_for_update()
+                )
+                await db.execute(sender_lock_query)
+                # Now check if any other campaign for this sender is IN_PROGRESS
                 in_progress_query = select(Campaign).where(
                     Campaign.sender_number == campaign.sender_number,
                     Campaign.status == "IN_PROGRESS",
@@ -46,6 +58,11 @@ class MessageQueue:
                 in_progress_campaign = in_progress_result.scalar_one_or_none()
                 if in_progress_campaign:
                     logging.warning(f"[CELERY] Skipping campaign {campaign_id}: another campaign for sender {campaign.sender_number} is already IN_PROGRESS.")
+                    # Log all campaigns for this sender
+                    debug_query = select(Campaign.id, Campaign.status, Campaign.completed_at).where(Campaign.sender_number == campaign.sender_number)
+                    debug_result = await db.execute(debug_query)
+                    debug_campaigns = debug_result.fetchall()
+                    logging.info(f"[DEBUG] All campaigns for sender {campaign.sender_number}: " + ", ".join([f'id={row[0]}, status={row[1]}, completed_at={row[2]}' for row in debug_campaigns]))
                     return
                 # ATOMIC: Try to claim the campaign by setting status to IN_PROGRESS only if it is PENDING
                 update_stmt = update(Campaign).where(
@@ -53,10 +70,14 @@ class MessageQueue:
                     Campaign.status == "PENDING"
                 ).values(status="IN_PROGRESS")
                 result = await db.execute(update_stmt)
-                await db.commit()
                 if result.rowcount == 0:
                     # Already claimed or processed by another worker
                     logging.warning(f"[CELERY] Skipping campaign {campaign_id}: already claimed or not pending.")
+                    # Log all campaigns for this sender
+                    debug_query = select(Campaign.id, Campaign.status, Campaign.completed_at).where(Campaign.sender_number == campaign.sender_number)
+                    debug_result = await db.execute(debug_query)
+                    debug_campaigns = debug_result.fetchall()
+                    logging.info(f"[DEBUG] All campaigns for sender {campaign.sender_number}: " + ", ".join([f'id={row[0]}, status={row[1]}, completed_at={row[2]}' for row in debug_campaigns]))
                     return
                 # Now fetch the campaign (should be IN_PROGRESS)
                 query = select(Campaign).where(Campaign.id == campaign_id)
@@ -64,6 +85,11 @@ class MessageQueue:
                 campaign = result.scalar_one_or_none()
                 if not campaign:
                     logging.error(f"[CELERY] Campaign {campaign_id} not found after claim.")
+                    # Log all campaigns for this sender
+                    debug_query = select(Campaign.id, Campaign.status, Campaign.completed_at).where(Campaign.sender_number == campaign.sender_number)
+                    debug_result = await db.execute(debug_query)
+                    debug_campaigns = debug_result.fetchall()
+                    logging.info(f"[DEBUG] All campaigns for sender {campaign.sender_number}: " + ", ".join([f'id={row[0]}, status={row[1]}, completed_at={row[2]}' for row in debug_campaigns]))
                     return
                 # Get pending messages
                 msg_query = select(Message.id).where(
@@ -72,40 +98,85 @@ class MessageQueue:
                 )
                 msg_result = await db.execute(msg_query)
                 message_ids = [row[0] for row in msg_result.fetchall()]
-                messaging_service = MessagingService(db)
-                for message_id in message_ids:
+                if not message_ids:
+                    logging.warning(f"[CELERY] Campaign {campaign_id} has no pending messages. Skipping.")
+                    # Log all campaigns for this sender
+                    debug_query = select(Campaign.id, Campaign.status, Campaign.completed_at).where(Campaign.sender_number == campaign.sender_number)
+                    debug_result = await db.execute(debug_query)
+                    debug_campaigns = debug_result.fetchall()
+                    logging.info(f"[DEBUG] All campaigns for sender {campaign.sender_number}: " + ", ".join([f'id={row[0]}, status={row[1]}, completed_at={row[2]}' for row in debug_campaigns]))
+                    return
+                for idx, message_id in enumerate(message_ids):
+                    # Always fetch the latest campaign object before sending each message
+                    query = select(Campaign).where(Campaign.id == campaign_id)
+                    result = await db.execute(query)
+                    fresh_campaign = result.scalar_one_or_none()
+                    if not fresh_campaign or fresh_campaign.status == "CANCELLED":
+                        logging.warning(f"[CELERY] Campaign {campaign_id} was cancelled. Aborting further message sends.")
+                        # Mark all remaining PENDING messages as CANCELLED
+                        pending_ids = message_ids[idx:]
+                        if pending_ids:
+                            await db.execute(
+                                update(Message)
+                                .where(Message.id.in_(pending_ids), Message.status == "PENDING")
+                                .values(status="CANCELLED", error="Campaign was cancelled.")
+                            )
+                        # Set campaign status and completed_at
+                        fresh_campaign = await db.get(Campaign, campaign_id)
+                        if fresh_campaign:
+                            fresh_campaign.status = "CANCELLED"
+                            fresh_campaign.completed_at = datetime.utcnow()
+                        await db.commit()
+                        return
                     try:
-                        query = select(Message).where(Message.id == message_id)
-                        result = await db.execute(query)
-                        message = result.scalar_one()
-                        await self._apply_rate_limiting(campaign.sender_number, db)
-                        final_message = campaign.template
-                        if campaign.variables:
-                            pass  # TODO: Implement variable replacement logic
-                        result = await messaging_service.send_message(
-                            campaign.sender_number,
-                            message.recipient,
-                            final_message,
-                            campaign.media_url
-                        )
-                        message.status = "SENT"
-                        message.sent_at = datetime.utcnow()
-                        message.delivered_at = message.sent_at
-                        waha_id = result["details"].get("waha_message_id")
-                        if isinstance(waha_id, dict):
-                            message.waha_message_id = waha_id.get("_serialized") or waha_id.get("id")
-                        else:
-                            message.waha_message_id = waha_id
-                        campaign.sent_messages += 1
+                        # Use a new session for rate limiting
+                        async with AsyncSession(db_pool, expire_on_commit=False) as db_rate:
+                            await self._apply_rate_limiting(fresh_campaign.sender_number, db_rate)
+                        # Use a new session for message sending
+                        async with AsyncSession(db_pool, expire_on_commit=False) as db_msg:
+                            messaging_service = MessagingService(db_msg)
+                            # Fetch message in this session
+                            query = select(Message).where(Message.id == message_id)
+                            result = await db_msg.execute(query)
+                            message = result.scalar_one()
+                            # Fetch latest campaign for template/variables/media_url
+                            query = select(Campaign).where(Campaign.id == campaign_id)
+                            result = await db_msg.execute(query)
+                            campaign_for_send = result.scalar_one()
+                            final_message = campaign_for_send.template
+                            if campaign_for_send.variables:
+                                pass  # TODO: Implement variable replacement logic
+                            send_result = await messaging_service.send_message(
+                                campaign_for_send.sender_number,
+                                message.recipient,
+                                final_message,
+                                campaign_for_send.media_url
+                            )
+                            message.status = "SENT"
+                            message.sent_at = datetime.utcnow()
+                            message.delivered_at = message.sent_at
+                            waha_id = send_result["details"].get("waha_message_id")
+                            if isinstance(waha_id, dict):
+                                message.waha_message_id = waha_id.get("_serialized") or waha_id.get("id")
+                            else:
+                                message.waha_message_id = waha_id
+                            # Update campaign sent_messages in main session
+                            fresh_campaign.sent_messages += 1
+                            await db_msg.commit()
+                        # Commit campaign sent_messages update in main session
                         await db.commit()
                     except Exception as e:
                         logging.error(f"[CELERY] Error sending message {message_id}: {str(e)}")
-                        query = select(Message).where(Message.id == message_id)
-                        result = await db.execute(query)
-                        message = result.scalar_one()
-                        message.status = "FAILED"
-                        message.error = str(e)
-                        campaign.failed_messages += 1
+                        # Mark message as failed in a new session
+                        async with AsyncSession(db_pool, expire_on_commit=False) as db_fail:
+                            query = select(Message).where(Message.id == message_id)
+                            result = await db_fail.execute(query)
+                            message = result.scalar_one()
+                            message.status = "FAILED"
+                            message.error = str(e)
+                            await db_fail.commit()
+                        # Update campaign failed_messages in main session
+                        fresh_campaign.failed_messages += 1
                         await db.commit()
                 # After all messages, update campaign status and completed_at
                 campaign.status = "COMPLETED"
@@ -331,8 +402,6 @@ class MessageQueue:
                                     if session:
                                         session.last_active = datetime.utcnow()
                                         await db_msg.commit()
-                                    # Update last_send_time for per-message delay
-                                    self.last_send_time[campaign.sender_number] = datetime.utcnow()
                                     # Update last_sender for sender switch delay
                                     self.last_sender = campaign.sender_number
                             except Exception as e:
@@ -399,6 +468,8 @@ class MessageQueue:
             elapsed = (now - last_time).total_seconds()
             if elapsed < message_delay:
                 await asyncio.sleep(message_delay - elapsed)
+        # Always update last_send_time after delay is applied
+        self.last_send_time[sender_number] = datetime.utcnow()
 
 # Create a singleton instance
 message_queue = MessageQueue()

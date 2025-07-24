@@ -11,17 +11,48 @@ import os
 from app.routers.delays import normalize_number  # Reuse normalization utility
 
 class CampaignService:
+    async def cancel_campaign(self, campaign_id: int) -> schemas.CampaignStatus:
+        """Cancel a campaign if it is IN_PROGRESS or PENDING"""
+        campaign = await self.get_campaign(campaign_id)
+        if not campaign:
+            raise ValueError("Campaign not found")
+        if campaign.status not in ("IN_PROGRESS", "PENDING"):
+            raise ValueError("Only campaigns that are IN_PROGRESS or PENDING can be cancelled.")
+        campaign.status = "CANCELLED"
+        campaign.completed_at = datetime.utcnow()
+        await self.db.commit()
+        return await self.get_campaign_status(campaign_id)
     def __init__(self, db: AsyncSession):
         self.db = db
         self.messaging = MessagingService()
         self.server_start_time = datetime.utcnow()
         
     async def create_campaign(self, campaign: schemas.CampaignCreate) -> schemas.CampaignResponse:
-        """Create a new campaign and queue its messages"""
+        """Create a new campaign and queue its messages, but only if no other campaign for this sender is PENDING or IN_PROGRESS and within daily limit"""
+        from app.services.message_limit import can_send_more
         # Normalize sender_number and recipients
         campaign.sender_number = normalize_number(campaign.sender_number)
         campaign.recipients = [normalize_number(r) for r in campaign.recipients]
-        
+
+        # Check for existing PENDING or IN_PROGRESS campaign for this sender
+        query = select(models.Campaign).where(
+            models.Campaign.sender_number == campaign.sender_number,
+            models.Campaign.status.in_(["PENDING", "IN_PROGRESS"])
+        )
+        result = await self.db.execute(query)
+        existing = result.scalars().first()
+        if existing:
+            raise ValueError("Sender already has a campaign in progress or pending. Please wait until it completes before starting a new one.")
+
+        # Enforce daily message limit
+        from app.services.message_limit import get_daily_limit
+        max_allowed = await get_daily_limit(self.db, campaign.sender_number)
+        from fastapi.responses import JSONResponse
+        if len(campaign.recipients) > max_allowed:
+            return JSONResponse(content={"message": f"Recipient count exceeds the allowed daily limit for this sender ({max_allowed}). Reduce recipients and try again."}, status_code=200)
+        if not await can_send_more(self.db, campaign.sender_number, len(campaign.recipients)):
+            return JSONResponse(content={"message": "Daily message limit reached for this sender. Please try again tomorrow."}, status_code=200)
+
         # First check if the sender has an active session
         waha_service = WAHASessionService(self.db)
         try:
@@ -30,7 +61,7 @@ class CampaignService:
             raise ValueError("WhatsApp session not found or not connected. Please create a session and scan the QR code before sending messages.")
         if session_status.get('status') not in ('CONNECTED', 'WORKING'):
             raise ValueError("WhatsApp session not connected. Please scan QR code to authenticate.")
-        
+
         # Create campaign record
         db_campaign = models.Campaign(
             sender_number=campaign.sender_number,
@@ -53,7 +84,6 @@ class CampaignService:
                 status="PENDING"
             )
             self.db.add(message)
-
 
         await self.db.commit()
 

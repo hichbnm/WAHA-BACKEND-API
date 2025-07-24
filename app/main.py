@@ -95,9 +95,7 @@ async def init_services():
     session_monitor = SessionMonitor(engine)
     await session_monitor.start()
     
-    # Start message queue processor (worker count from env)
-    await message_queue.start_processing(engine)
-    
+    # Do NOT start message queue processor here; only Celery should process campaigns
     logging.info("Database initialized and background services started")
 
 scheduler = AsyncIOScheduler()

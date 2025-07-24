@@ -54,7 +54,8 @@ pip install -r requirements.txt
 ## 4. Run the FastAPI Server (Auto-Creates Tables)
 ```bash
 source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 5000
+uvicorn app.main:app --host 0.0.0.0 --port 5000 --workers 4
+celery -A celery_app.celery_app worker --loglevel=debug --concurrency=4
 ```
 - On first run, the app will automatically create all tables in the database.
 

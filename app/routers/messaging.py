@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -17,16 +18,28 @@ async def create_campaign(
     campaign: schemas.CampaignCreate,
     db: AsyncSession = Depends(get_db)
 ):
-    """Create a new messaging campaign"""
+    """Create a new messaging campaign (enqueue for background processing only)"""
     campaign.sender_number = normalize_number(campaign.sender_number)
     campaign.recipients = [normalize_number(r) for r in campaign.recipients]
     campaign_service = CampaignService(db)
     try:
+        # Only create the campaign and enqueue Celery task, do NOT process campaign here
         result = await campaign_service.create_campaign(campaign)
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/cancel/{campaign_id}", response_model=schemas.CampaignStatus)
+async def cancel_campaign(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Cancel a campaign by ID if it is IN_PROGRESS or PENDING"""
+    campaign_service = CampaignService(db)
+    try:
+        return await campaign_service.cancel_campaign(campaign_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 @router.get("/status/{campaign_id}", response_model=schemas.CampaignStatus)
 async def get_campaign_status(
     campaign_id: int,
