@@ -24,6 +24,7 @@ class Campaign(Base):
     failed_messages = Column(Integer, default=0)
     variables = Column(JSON)
     media_url = Column(String, nullable=True)
+    celery_task_id = Column(String, nullable=True)  # Track Celery task for cancellation
 
     messages = relationship("Message", back_populates="campaign")
 

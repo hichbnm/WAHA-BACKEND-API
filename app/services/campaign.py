@@ -12,16 +12,24 @@ from app.routers.delays import normalize_number  # Reuse normalization utility
 
 class CampaignService:
     async def cancel_campaign(self, campaign_id: int) -> schemas.CampaignStatus:
-        """Cancel a campaign if it is IN_PROGRESS or PENDING"""
+        """Cancel a campaign if it is IN_PROGRESS or PENDING, and revoke Celery task if possible"""
         campaign = await self.get_campaign(campaign_id)
         if not campaign:
             raise ValueError("Campaign not found")
         if campaign.status not in ("IN_PROGRESS", "PENDING"):
             raise ValueError("Only campaigns that are IN_PROGRESS or PENDING can be cancelled.")
+        # Revoke Celery task if task_id is present
+        if campaign.celery_task_id:
+            try:
+                from celery_app import celery_app
+                celery_app.control.revoke(campaign.celery_task_id, terminate=True)
+            except Exception as e:
+                import logging
+                logging.error(f"Failed to revoke Celery task {campaign.celery_task_id}: {e}")
         campaign.status = "CANCELLED"
         campaign.completed_at = datetime.utcnow()
         await self.db.commit()
-        return await self.get_campaign_status(campaign_id)
+        return await self.get_campaign_status(campaign_id)  
     def __init__(self, db: AsyncSession):
         self.db = db
         self.messaging = MessagingService()
@@ -88,13 +96,15 @@ class CampaignService:
         await self.db.commit()
 
         # Enqueue campaign for background processing via Celery
+# Enqueue campaign for background processing via Celery and store task ID
         try:
             from tasks.campaign_tasks import process_campaign_task
-            process_campaign_task.delay(db_campaign.id)
+            result = process_campaign_task.delay(db_campaign.id)
+            db_campaign.celery_task_id = result.id
+            await self.db.commit()
         except Exception as e:
             import logging
             logging.error(f"Failed to enqueue campaign {db_campaign.id} to Celery: {e}")
-
         return schemas.CampaignResponse(
             id=db_campaign.id,
             status="PENDING",

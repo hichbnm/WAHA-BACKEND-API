@@ -24,6 +24,8 @@ async def set_delays(
     admin_token: str = Depends(verify_admin_token)
 ):
     """Set message delay for global system (admin only)"""
+    if message_delay is not None and not (1 <= message_delay <= 30):
+        return {"error": "message_delay must be between 1 and 30 seconds."}
     from app.services.delay_config import set_delay_config, get_delay_config
     async with async_session() as db:
         await set_delay_config(db, message_delay, None, None)
@@ -58,6 +60,8 @@ async def set_user_delays(
     message_delay: int = None
 ):
     """Set message delay for a specific user"""
+    if message_delay is not None and not (1 <= message_delay <= 30):
+        return {"error": "message_delay must be between 1 and 30 seconds."}
     sender_number = normalize_number(sender_number)
     async with async_session() as db:
         result = await db.execute(select(UserDelay).where(UserDelay.sender_number == sender_number))

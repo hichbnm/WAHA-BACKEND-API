@@ -38,8 +38,8 @@ class MessagingService:
             logging.error(f"Failed to decode WAHA API response: {str(e)}")
             raise ValueError("Invalid response from WAHA API")
 
-    async def send_message(self, sender_number: str, recipient: str, message: str, media_url: Optional[str] = None) -> Dict[str, Any]:
-        """Send a message with optional media. If both message and media_url are provided, send as a single media message with caption."""
+    async def send_message(self, sender_number: str, recipient: str, message: str, media_url: Optional[str] = None, media_file: Optional[dict] = None) -> Dict[str, Any]:
+        """Send a message with optional media_url or media_file (image, video, etc.)."""
         try:
             recipient_id = recipient.lstrip('+') + '@c.us'
             if not self.db:
@@ -51,9 +51,52 @@ class MessagingService:
             text_sent = False
             media_sent = False
 
-            if media_url:
+            # Prefer media_file if provided
+            if media_file:
+                mimetype = media_file.get("mimetype")
+                filename = media_file.get("filename")
+                file_url = media_file.get("url")
+                file_data = media_file.get("base64")
+                caption = media_file.get("caption") or message or ""
+                # Choose WAHA endpoint based on mimetype
+                if mimetype and mimetype.startswith("video"):
+                    endpoint = "sendVideo"
+                elif mimetype and mimetype.startswith("image"):
+                    endpoint = "sendImage"
+                else:
+                    endpoint = "sendFile"
+                file_payload = {
+                    "chatId": recipient_id,
+                    "file": {
+                        "mimetype": mimetype,
+                        "filename": filename
+                    },
+                    "caption": caption,
+                    "session": sender_number
+                }
+                if file_url:
+                    file_payload["file"]["url"] = file_url
+                if file_data:
+                    file_payload["file"]["base64"] = file_data
+                # Add extra fields for video if present
+                if endpoint == "sendVideo":
+                    if "asNote" in media_file:
+                        file_payload["asNote"] = media_file["asNote"]
+                    if "convert" in media_file:
+                        file_payload["convert"] = media_file["convert"]
+                media_response = await self._make_waha_request(
+                    endpoint,
+                    data=file_payload,
+                    waha_url=waha_url,
+                    api_key=api_key
+                )
+                if media_response.get("error"):
+                    raise ValueError(f"Failed to send file: {media_response['error']}")
+                waha_message_id = media_response.get("id")
+                media_sent = True
+                text_sent = bool(message)
+            elif media_url:
                 # Use /api/sendImage endpoint with WAHA's required schema
-                # Guess mimetype from URL extension (default to image/jpeg)
                 import mimetypes, os
                 mimetype, _ = mimetypes.guess_type(media_url)
                 if not mimetype:
