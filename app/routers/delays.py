@@ -15,27 +15,21 @@ async def get_delays(admin_token: str = Depends(verify_admin_token)):
     async with async_session() as db:
         config = await get_delay_config(db)
         return {
-            "MESSAGE_DELAY": config.message_delay,
-            "SENDER_SWITCH_DELAY": config.sender_switch_delay,
-            "CAMPAIGN_DELAY": config.campaign_delay
+            "MESSAGE_DELAY": config.message_delay
         }
 
 @router.post("/delays", tags=["admin"])
 async def set_delays(
     message_delay: int = None,
-    sender_switch_delay: int = None,
-    campaign_delay: int = None,
     admin_token: str = Depends(verify_admin_token)
 ):
-    """Set message and sender switch delays for global system (admin only)"""
+    """Set message delay for global system (admin only)"""
     from app.services.delay_config import set_delay_config, get_delay_config
     async with async_session() as db:
-        await set_delay_config(db, message_delay, sender_switch_delay, campaign_delay)
+        await set_delay_config(db, message_delay, None, None)
         config = await get_delay_config(db)
         return {
-            "MESSAGE_DELAY": config.message_delay,
-            "SENDER_SWITCH_DELAY": config.sender_switch_delay,
-            "CAMPAIGN_DELAY": config.campaign_delay
+            "MESSAGE_DELAY": config.message_delay
         }
 
 def normalize_number(number: str) -> str:
@@ -51,22 +45,19 @@ async def get_user_delays(sender_number: str = Query(...)):
         user_delay = result.scalar_one_or_none()
         if user_delay:
             return {
-                "MESSAGE_DELAY": user_delay.message_delay,
-                "CAMPAIGN_DELAY": user_delay.campaign_delay
+                "MESSAGE_DELAY": user_delay.message_delay
             }
         # Fallback to global
         return {
-            "MESSAGE_DELAY": int(os.getenv("MESSAGE_DELAY", 2)),
-            "CAMPAIGN_DELAY": int(os.getenv("CAMPAIGN_DELAY", 10))
+            "MESSAGE_DELAY": int(os.getenv("MESSAGE_DELAY", 2))
         }
 
 @router.post("/user-delays", include_in_schema=True)
 async def set_user_delays(
     sender_number: str = Query(...),
-    message_delay: int = None,
-    campaign_delay: int = None
+    message_delay: int = None
 ):
-    """Set message and campaign delays for a specific user"""
+    """Set message delay for a specific user"""
     sender_number = normalize_number(sender_number)
     async with async_session() as db:
         result = await db.execute(select(UserDelay).where(UserDelay.sender_number == sender_number))
@@ -74,17 +65,13 @@ async def set_user_delays(
         if user_delay is None:
             user_delay = UserDelay(
                 sender_number=sender_number,
-                message_delay=message_delay,
-                campaign_delay=campaign_delay
+                message_delay=message_delay
             )
             db.add(user_delay)
         else:
             if message_delay is not None:
                 user_delay.message_delay = message_delay
-            if campaign_delay is not None:
-                user_delay.campaign_delay = campaign_delay
         await db.commit()
         return {
-            "MESSAGE_DELAY": user_delay.message_delay,
-            "CAMPAIGN_DELAY": user_delay.campaign_delay
+            "MESSAGE_DELAY": user_delay.message_delay
         }

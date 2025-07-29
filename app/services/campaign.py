@@ -176,7 +176,8 @@ class CampaignService:
             messages_sent_today = await self.db.execute(messages_query)
             messages_sent_today = messages_sent_today.scalar() or 0
 
-            queue_size = await message_queue.get_size()  # Per-user queue size not implemented, return global size
+            from app.db.database import engine
+            queue_size = await message_queue.get_size(engine)  # Per-user queue size not implemented, return global size
 
             campaigns_query = select(func.count()).select_from(models.Campaign).where(models.Campaign.sender_number == sender_number)
             total_campaigns = await self.db.execute(campaigns_query)
@@ -200,7 +201,8 @@ class CampaignService:
             messages_sent_today = await self.db.execute(messages_query)
             messages_sent_today = messages_sent_today.scalar() or 0
             
-            queue_size = await message_queue.get_size()
+            from app.db.database import engine
+            queue_size = await message_queue.get_size(engine)
             
             campaigns_query = select(func.count()).select_from(models.Campaign)
             total_campaigns = await self.db.execute(campaigns_query)

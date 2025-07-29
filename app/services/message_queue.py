@@ -234,17 +234,17 @@ class MessageQueue:
 
     # No longer needed: campaigns are selected directly from DB
 
-    async def get_size(self) -> int:
+    async def get_size(self, db_pool) -> int:
         """Get number of campaigns with pending messages in DB."""
-        async with AsyncSession(self.db_pool) as db:
+        async with AsyncSession(db_pool) as db:
             query = select(Message.campaign_id).where(Message.status == "PENDING")
             result = await db.execute(query)
             campaigns = set(row[0] for row in result.fetchall())
             return len(campaigns)
 
-    async def get_size_by_sender(self, sender_number: str) -> int:
+    async def get_size_by_sender(self, db_pool, sender_number: str) -> int:
         sender_number = normalize_number(sender_number)
-        async with AsyncSession(self.db_pool) as db:
+        async with AsyncSession(db_pool) as db:
             from app.models.models import Campaign, Message
             query = select(Message.campaign_id).join(Campaign).where(
                 Message.status == "PENDING",
@@ -457,18 +457,30 @@ class MessageQueue:
         # Fetch per-user message delay from DB
         result = await db_session.execute(select(UserDelay).where(UserDelay.sender_number == sender_number))
         user_delay = result.scalar_one_or_none()
+        import random
+        import logging
         if user_delay and user_delay.message_delay is not None:
-            message_delay = int(user_delay.message_delay)
+            base_delay = int(user_delay.message_delay)
         else:
-            message_delay = config.message_delay
+            base_delay = config.message_delay
+
+        # Pick a random delay between base_delay-1 and base_delay+1 (minimum 1 second)
+        if base_delay is not None:
+            message_delay = random.randint(max(1, base_delay - 1), base_delay + 1)
+        else:
+            message_delay = 2
+
+        logging.info(f"[RATE LIMIT] Sender: {sender_number}, Base delay: {base_delay}, Chosen delay: {message_delay}")
 
         # Check if we need to apply message delay
         if sender_number in self.last_send_time:
             last_time = self.last_send_time[sender_number]
             elapsed = (now - last_time).total_seconds()
             if elapsed < message_delay:
+                logging.info(f"[RATE LIMIT] Sender: {sender_number}, Sleeping for: {message_delay - elapsed:.2f} seconds (elapsed: {elapsed:.2f})")
                 await asyncio.sleep(message_delay - elapsed)
         # Always update last_send_time after delay is applied
+        logging.info(f"[RATE LIMIT] Sender: {sender_number}, Message sent at: {datetime.utcnow().isoformat()}")
         self.last_send_time[sender_number] = datetime.utcnow()
 
 # Create a singleton instance
