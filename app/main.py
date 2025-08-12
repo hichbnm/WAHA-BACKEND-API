@@ -15,6 +15,12 @@ import time
 from app.services.waha_session import WAHASessionService
 from app.db.database import async_session
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from app.services.dispatcher import RoundRobinDispatcher
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present
+# Use override=True so .env wins over any pre-exported shell vars for this app
+load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(
@@ -122,6 +128,13 @@ async def startup_event():
     )
     scheduler.start()
     logging.info("Application started successfully")
+    # Start round-robin dispatcher (singleton via Redis lock)
+    try:
+        dispatcher = RoundRobinDispatcher()
+        asyncio.create_task(dispatcher.dispatch())
+        logging.info("RoundRobinDispatcher started")
+    except Exception as e:
+        logging.warning(f"Dispatcher not started: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():

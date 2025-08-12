@@ -38,11 +38,13 @@ A FastAPI-based backend service for sending bulk WhatsApp messages using the WAH
    cp .env.example .env
    ```
 
-5. Configure your .env file with appropriate values:
-   - WAHA_HOST and WAHA_PORT
-   - DATABASE_URL
-   - ADMIN_API_KEY
-   - Message delays and logging settings
+5. Configure your .env file with appropriate values (see .env.example):
+   - API_HOST, API_PORT
+   - DATABASE_URL (PostgreSQL recommended; SQLite supported)
+   - ADMIN_API_KEY (used in X-Admin-API-Key header)
+   - REDIS_URL (Celery + dispatcher lock)
+   - MESSAGE_DELAY, MAX_UPLOAD_MB, FILES_DIR, LOG_LEVEL/LOG_FILE
+   - MAX_LIVE_SESSIONS, SESSION_* for session monitor
 
 ## Running the Service
 

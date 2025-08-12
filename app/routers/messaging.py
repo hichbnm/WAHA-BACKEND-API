@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
@@ -10,6 +10,10 @@ from app.services.messaging import MessagingService
 from app.services.campaign import CampaignService
 from app.utils.auth import verify_admin_token, get_optional_admin_token
 from app.routers.delays import normalize_number  # Reuse normalization utility
+import os
+import hashlib
+from datetime import datetime
+from typing import Dict
 
 router = APIRouter()
 
@@ -91,6 +95,18 @@ async def list_campaigns(
     )
     return campaigns
 
+@router.get("/campaigns/{campaign_id}/failed", response_model=schemas.FailedRecipientsResponse)
+async def get_failed_recipients(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the list of failed recipients for a campaign."""
+    campaign_service = CampaignService(db)
+    try:
+        return await campaign_service.get_failed_recipients(campaign_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
 @router.get("/metrics", response_model=schemas.SystemMetrics)
 async def get_system_metrics(
     sender_number: str,
@@ -100,3 +116,51 @@ async def get_system_metrics(
     sender_number = normalize_number(sender_number)
     campaign_service = CampaignService(db)
     return await campaign_service.get_system_metrics(sender_number=sender_number)
+
+@router.post("/upload")
+async def upload_media(file: UploadFile = File(...)) -> Dict[str, str]:
+    """Upload a media file to local storage and return its relative path for later use.
+    Files are stored under FILES_DIR (env, default 'files') with structure: YYYY/MM/DD/HH/<sha1>.<ext>
+    Enforces a global max size from MAX_UPLOAD_MB env (default 15MB).
+    """
+    # Config
+    files_dir = os.getenv("FILES_DIR", "files")
+    max_mb = int(os.getenv("MAX_UPLOAD_MB", "15"))
+    max_bytes = max_mb * 1024 * 1024
+
+    # Stream read to compute size and sha1
+    sha1 = hashlib.sha1()
+    total = 0
+    chunks = []
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail=f"File too large. Max {max_mb} MB")
+        sha1.update(chunk)
+        chunks.append(chunk)
+
+    # Determine extension and build path
+    _, ext = os.path.splitext(file.filename or "")
+    now = datetime.utcnow()
+    rel_dir = os.path.join(
+        now.strftime("%Y"),
+        now.strftime("%m"),
+        now.strftime("%d"),
+        now.strftime("%H")
+    )
+    digest = sha1.hexdigest()
+    rel_path = os.path.join(rel_dir, f"{digest}{ext.lower() if ext else ''}")
+    abs_dir = os.path.join(files_dir, rel_dir)
+    abs_path = os.path.join(files_dir, rel_dir, f"{digest}{ext.lower() if ext else ''}")
+
+    # Ensure directory exists and write file
+    os.makedirs(abs_dir, exist_ok=True)
+    with open(abs_path, "wb") as out:
+        for c in chunks:
+            out.write(c)
+
+    # Return relative path the client should place into campaign.media_url
+    return {"path": os.path.join(files_dir, rel_path)}

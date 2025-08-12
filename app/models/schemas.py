@@ -182,6 +182,15 @@ class MeInfo(BaseModel):
             datetime: lambda v: v.isoformat()
         }
 
+class FailedRecipient(BaseModel):
+    recipient: str
+    error: Optional[str] = None
+
+class FailedRecipientsResponse(BaseModel):
+    campaign_id: int
+    count: int
+    recipients: List[FailedRecipient]
+
 class WorkerCreate(BaseModel):
     url: str
     api_key: str

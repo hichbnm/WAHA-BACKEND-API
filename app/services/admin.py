@@ -32,8 +32,9 @@ class AdminService:
             messages_sent_today = await self.db.execute(messages_query)
             messages_sent_today = messages_sent_today.scalar() or 0
             
-            # Get current queue size from the singleton instance
-            queue_size = await message_queue.get_size()
+            # Get current queue size from the singleton instance (requires DB engine/pool)
+            from app.db.database import engine
+            queue_size = await message_queue.get_size(engine)
             
             # Get total campaigns and users
             campaigns_query = select(func.count()).select_from(Campaign)

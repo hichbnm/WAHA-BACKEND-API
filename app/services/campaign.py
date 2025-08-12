@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import func, select, or_
+from sqlalchemy import func, select, or_, update
 from datetime import datetime, timedelta
 import asyncio
 import logging
@@ -26,6 +26,15 @@ class CampaignService:
             except Exception as e:
                 import logging
                 logging.error(f"Failed to revoke Celery task {campaign.celery_task_id}: {e}")
+        # Mark all remaining PENDING/IN_PROGRESS messages as CANCELLED so the dispatcher/tasks won't process them
+        await self.db.execute(
+            update(models.Message)
+            .where(
+                models.Message.campaign_id == campaign_id,
+                models.Message.status.in_(["PENDING", "IN_PROGRESS"])  # cooperative cancel
+            )
+            .values(status="CANCELLED", error="Campaign was cancelled.")
+        )
         campaign.status = "CANCELLED"
         campaign.completed_at = datetime.utcnow()
         await self.db.commit()
@@ -94,17 +103,6 @@ class CampaignService:
             self.db.add(message)
 
         await self.db.commit()
-
-        # Enqueue campaign for background processing via Celery
-# Enqueue campaign for background processing via Celery and store task ID
-        try:
-            from tasks.campaign_tasks import process_campaign_task
-            result = process_campaign_task.delay(db_campaign.id)
-            db_campaign.celery_task_id = result.id
-            await self.db.commit()
-        except Exception as e:
-            import logging
-            logging.error(f"Failed to enqueue campaign {db_campaign.id} to Celery: {e}")
         return schemas.CampaignResponse(
             id=db_campaign.id,
             status="PENDING",
@@ -140,6 +138,26 @@ class CampaignService:
             status.messages = result.scalars().all()
             
         return status
+
+    async def get_failed_recipients(self, campaign_id: int) -> schemas.FailedRecipientsResponse:
+        """Return the list of failed recipients (and last error) for a campaign."""
+        # Ensure campaign exists
+        campaign = await self.get_campaign(campaign_id)
+        if not campaign:
+            raise ValueError("Campaign not found")
+
+        from sqlalchemy import select
+        q = select(models.Message).where(
+            models.Message.campaign_id == campaign_id,
+            models.Message.status == 'FAILED'
+        )
+        res = await self.db.execute(q)
+        msgs = res.scalars().all()
+        return schemas.FailedRecipientsResponse(
+            campaign_id=campaign_id,
+            count=len(msgs),
+            recipients=[schemas.FailedRecipient(recipient=m.recipient, error=m.error) for m in msgs]
+        )
 
     async def list_campaigns(
         self,
