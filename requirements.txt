@@ -15,4 +15,5 @@ asyncpg>=0.30.0
 apscheduler
 pytest  # for testing
 redis>=4.0.0 
-celery[redis]
+celery[redis]==5.3.6
+vine>=5.1.0,<6.0

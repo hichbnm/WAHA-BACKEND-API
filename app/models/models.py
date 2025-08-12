@@ -5,10 +5,12 @@ import enum
 from datetime import datetime
 
 class MessageStatus(str, enum.Enum):
-    PENDING = "pending"
-    SENT = "sent"
-    FAILED = "failed"
-    DELIVERED = "delivered"
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    SENT = "SENT"
+    FAILED = "FAILED"
+    DELIVERED = "DELIVERED"
+    CANCELLED = "CANCELLED"
 
 class Campaign(Base):
     __tablename__ = "campaigns"

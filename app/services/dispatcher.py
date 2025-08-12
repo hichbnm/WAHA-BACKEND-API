@@ -4,7 +4,7 @@ import collections
 import logging
 from typing import Deque, Dict, Optional
 from datetime import datetime, timedelta
-import random
+import math
 
 
 from app.models.models import Message
@@ -67,10 +67,14 @@ class RoundRobinDispatcher:
             message = result.scalar_one_or_none()
             return message
 
-    async def mark_message_in_progress(self, message_id: int) -> bool:
+    async def mark_message_in_progress(self, message_id: int, sender_number: str) -> bool:
+        """Atomically mark a message IN_PROGRESS only if no other message is IN_PROGRESS for this sender.
+        Returns True if the row was updated, False otherwise.
+        """
         from app.models.models import Campaign
+        from sqlalchemy import exists, and_, not_
         async with async_session() as session:
-            # Guard: if parent campaign was cancelled/completed, do not mark in progress
+            # Ensure campaign is still active
             camp_id_res = await session.execute(select(Message.campaign_id).where(Message.id == message_id))
             camp_id = camp_id_res.scalar_one_or_none()
             if camp_id is None:
@@ -79,16 +83,37 @@ class RoundRobinDispatcher:
             camp_status = camp_res.scalar_one_or_none()
             if camp_status not in ('PENDING', 'IN_PROGRESS'):
                 return False
-            # Set message IN_PROGRESS
-            await session.execute(
-                update(Message).where(Message.id == message_id).values(status='IN_PROGRESS')
+
+            # Build NOT EXISTS for any other IN_PROGRESS message for this sender
+            m2 = Message.__table__.alias('m2')
+            c2 = Campaign.__table__.alias('c2')
+            exists_inflight = exists(
+                select(1)
+                .select_from(m2.join(c2, m2.c.campaign_id == c2.c.id))
+                .where(and_(
+                    c2.c.sender_number == sender_number,
+                    m2.c.status == 'IN_PROGRESS'
+                ))
             )
-            # Also ensure parent campaign is marked IN_PROGRESS
+            # Perform conditional update
+            result = await session.execute(
+                update(Message)
+                .where(
+                    and_(
+                        Message.id == message_id,
+                        not_(exists_inflight)
+                    )
+                )
+                .values(status='IN_PROGRESS')
+            )
+            updated = result.rowcount and result.rowcount > 0
+            if not updated:
+                await session.rollback()
+                return False
+            # Ensure parent campaign is marked IN_PROGRESS
             await session.execute(
                 update(Campaign)
-                .where(Campaign.id == (
-                    select(Message.campaign_id).where(Message.id == message_id).scalar_subquery()
-                ))
+                .where(Campaign.id == camp_id)
                 .values(status='IN_PROGRESS')
             )
             await session.commit()
@@ -147,21 +172,38 @@ class RoundRobinDispatcher:
                                 result = await session.execute(select(UserDelay).where(UserDelay.sender_number == sender))
                                 user_delay = result.scalar_one_or_none()
                                 base_delay = int(user_delay.message_delay) if (user_delay and user_delay.message_delay is not None) else config.message_delay
-                            chosen_delay = max(1, random.randint(max(1, base_delay - 1), base_delay + 1)) if base_delay else 2
-                            self._next_allowed_time[sender] = now + timedelta(seconds=chosen_delay)
-                            logging.info(f"[RATE LIMIT] Sender: {sender}, Base delay: {base_delay}, Chosen delay: {chosen_delay}")
-                            # Ensure only one in-flight per sender
-                            if await self.has_in_progress(sender):
-                                logging.debug(f"Dispatcher: Sender {sender} already has an IN_PROGRESS message. Rotating.")
-                                self.sender_queue.append(sender)
-                                await asyncio.sleep(0.1)
-                                continue
-                            # Mark as IN_PROGRESS atomically; skip enqueue if campaign is no longer active
-                            if await self.mark_message_in_progress(message.id):
+                                # Extra guard: ensure at least base_delay seconds from last SENT message for this sender
+                                from sqlalchemy import func
+                                from app.models.models import Campaign
+                                last_sent_res = await session.execute(
+                                    select(func.max(Message.sent_at))
+                                    .join(Campaign, Message.campaign_id == Campaign.id)
+                                    .where(
+                                        Campaign.sender_number == sender,
+                                        Message.sent_at.isnot(None)
+                                    )
+                                )
+                                last_sent_at = last_sent_res.scalar_one_or_none()
+                            if last_sent_at is not None:
+                                gap = (now - last_sent_at).total_seconds()
+                                if gap < (base_delay or 1):
+                                    remaining = (base_delay or 1) - gap
+                                    logging.debug(f"[RATE LIMIT/DB] Sender: {sender}, last_sent gap={gap:.2f}s, need {remaining:.2f}s more")
+                                    # Push the sender to the back and wait a bit to avoid tight loop
+                                    self.sender_queue.append(sender)
+                                    await asyncio.sleep(min(max(remaining, 0.1), 1.0))
+                                    continue
+                            # Strictly enforce at least the configured delay; remove jitter
+                            chosen_delay = max(1, int(math.ceil(base_delay or 1)))
+                            # Mark as IN_PROGRESS atomically; skip enqueue if campaign is no longer active or another inflight exists
+                            if await self.mark_message_in_progress(message.id, sender):
+                                # set next allowed time only when we actually enqueue
+                                self._next_allowed_time[sender] = now + timedelta(seconds=chosen_delay)
+                                logging.info(f"[RATE LIMIT] Sender: {sender}, Base delay: {base_delay}, Chosen delay: {chosen_delay}")
                                 logging.info(f"Dispatcher: Enqueuing Celery task for message {message.id} (sender={sender})")
                                 process_message_task.delay(message.id)
                             else:
-                                logging.info(f"Dispatcher: Skip enqueue, campaign no longer active for message {message.id}")
+                                logging.info(f"Dispatcher: Skip enqueue for message {message.id} (sender={sender}); campaign inactive or another inflight exists")
                         else:
                             logging.info(f"Dispatcher: No pending message found for sender {sender}")
                         # Rotate sender to end of queue if still has pending messages

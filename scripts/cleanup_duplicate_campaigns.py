@@ -37,7 +37,7 @@ async def cleanup_duplicate_campaigns():
             print("No duplicate campaigns found.")
 
         # Mark all remaining PENDING campaigns as COMPLETED_WITH_ERRORS
-        result = await session.execute(select(Campaign.id).where(Campaign.status == "PENDING"))
+        result = await session.execute(select(Campaign.id).where(Campaign.status == "IN_PROGRESS"))
         pending_campaigns = [row[0] for row in result.fetchall()]
         if pending_campaigns:
             print(f"Marking all remaining PENDING campaigns as COMPLETED_WITH_ERRORS: {pending_campaigns}")
